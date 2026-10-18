@@ -27,6 +27,15 @@
 #include "fast/interpreter.h"
 #include "ship/config/ConsoleVariable.h"
 
+#ifdef __SWITCH__
+#include <chrono>
+// Read by the port's hitch monitor to attribute frame stalls to shader compiles.
+extern "C" {
+uint32_t gLusShaderCompileCount = 0;
+uint64_t gLusShaderCompileMicros = 0;
+}
+#endif
+
 namespace Fast {
 int GfxRenderingAPIOGL::GetMaxTextureSize() {
     GLint max_texture_size;
@@ -527,6 +536,9 @@ void GfxRenderingAPIOGL::ClearShaderCache() {
 }
 
 ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+#ifdef __SWITCH__
+    const auto compileStart = std::chrono::steady_clock::now();
+#endif
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
     const auto fs_buf = BuildFsShader(cc_features);
@@ -681,6 +693,11 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
         glUniform1i(sampler_location, SHADER_PALETTE_TEXTURE);
     }
 
+#ifdef __SWITCH__
+    gLusShaderCompileCount++;
+    gLusShaderCompileMicros +=
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart).count();
+#endif
     return prg;
 }
 
