@@ -47,6 +47,10 @@
 #include <emscripten/html5.h>
 #endif
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 #include "ship/window/gui/Gui.h"
 #include "fast/Fast3dGui.h"
 
@@ -226,6 +230,11 @@ GfxWindowBackendSDL2::~GfxWindowBackendSDL2() {
 }
 
 void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
+#ifdef __SWITCH__
+    // The window is always the whole screen. Fullscreen would stop switch-sdl2's
+    // dock/undock resize, which only applies to resizable windowed windows.
+    return;
+#endif
     if (mFullScreen == on) {
         return;
     }
@@ -348,6 +357,22 @@ static LRESULT CALLBACK gfx_sdl_wnd_proc(HWND h_wnd, UINT message, WPARAM w_para
 
 void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bool startFullScreen, uint32_t width,
                                 uint32_t height, int32_t posX, int32_t posY) {
+#ifdef __SWITCH__
+    // Size the window for the current mode rather than the saved config: switch-sdl2
+    // samples the mode at window creation and only resizes when it later changes.
+    // Its SDL_PumpEvents then calls appletMainLoop() every frame, turning a Horizon
+    // exit request into SDL_QUIT and resizing to 1920x1080 / 1280x720 on dock changes.
+    if (appletGetOperationMode() == AppletOperationMode_Console) {
+        width = 1920;
+        height = 1080;
+    } else {
+        width = 1280;
+        height = 720;
+    }
+    startFullScreen = false;
+    posX = 0;
+    posY = 0;
+#endif
     mWindowWidth = width;
     mWindowHeight = height;
 

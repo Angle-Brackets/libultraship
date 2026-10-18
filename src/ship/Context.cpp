@@ -29,6 +29,51 @@
 #include <pwd.h>
 #endif
 
+#ifdef __SWITCH__
+#include <sys/stat.h>
+#include <unistd.h>
+
+extern "C" int __system_argc;
+extern "C" char** __system_argv;
+
+namespace {
+// Paths handed out without the "sdmc:" prefix: libstdc++ treats "sdmc:/x" as relative,
+// so std::filesystem::absolute() would glue it onto the cwd. A leading '/' resolves on
+// the default device, which SwitchAppRoot() pins to the SD card.
+constexpr const char* kSwitchAppRoot = "/switch/paperboat";
+
+const std::string& SwitchAppRoot() {
+    static const std::string root = [] {
+        mkdir("sdmc:/switch", 0777);
+        mkdir("sdmc:/switch/paperboat", 0777);
+        // Makes sdmc the default device and "./" lookups land in the app folder,
+        // whether launched from hbmenu, a forwarder or nxlink.
+        chdir("sdmc:/switch/paperboat");
+        return std::string(kSwitchAppRoot);
+    }();
+    return root;
+}
+
+// Folder the NRO was launched from (hbloader passes "sdmc:/.../name.nro" as argv[0]),
+// so loose files next to an NRO outside /switch/paperboat are still found.
+std::string SwitchNroDirectory() {
+    if (__system_argc < 1 || __system_argv == nullptr || __system_argv[0] == nullptr) {
+        return {};
+    }
+    std::string nroPath(__system_argv[0]);
+    if (nroPath.rfind("sdmc:/", 0) != 0) {
+        return {};
+    }
+    nroPath.erase(0, strlen("sdmc:"));
+    const size_t lastSlash = nroPath.find_last_of('/');
+    if (lastSlash == std::string::npos || lastSlash == 0) {
+        return {};
+    }
+    return nroPath.substr(0, lastSlash);
+}
+} // namespace
+#endif
+
 namespace Ship {
 std::unique_ptr<Context> Context::mContext;
 
@@ -489,6 +534,14 @@ std::string Context::GetAppBundlePath() {
     }
 #endif
 
+#ifdef __SWITCH__
+    {
+        const std::string& appRoot = SwitchAppRoot();
+        const std::string nroDir = SwitchNroDirectory();
+        return nroDir.empty() ? appRoot : nroDir;
+    }
+#endif
+
 #ifdef NON_PORTABLE
     return CMAKE_INSTALL_PREFIX;
 #else
@@ -549,6 +602,11 @@ std::string Context::GetAppDirectoryPath(const std::string& appName) {
 
 #ifdef __EMSCRIPTEN__
     return "/storage";
+#endif
+
+#ifdef __SWITCH__
+    // Primary search dir for archives, config, saves and mods: sdmc:/switch/paperboat/.
+    return SwitchAppRoot();
 #endif
 
 #ifdef __IOS__
