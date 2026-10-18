@@ -22,6 +22,14 @@ bool Enabled();
 void EnterArea(const std::string& area);
 // Any thread. Queues the global set for the next frame.
 void RequestGlobal();
+// Any thread. About to leave for `area` (its fade-out is starting): its shaders are handed out by
+// TakeOne in idle time, and only after graceMs while frames are still drawn, once the fade is dark.
+// Recording stays on the current area until EnterArea.
+void PrepareArea(const std::string& area, int graceMs);
+
+// Window thread, between frames: one shader to compile now. `drawing` = the game is presenting
+// frames, so only a prepared area's shaders (past its grace period) are given out.
+bool TakeOne(std::pair<uint64_t, uint64_t>& out, bool drawing);
 
 // Render thread: a combiner was bound for drawing.
 void NoteUse(uint64_t id0, uint64_t id1);

@@ -1,6 +1,7 @@
 #include "fast/ShaderPrewarm.h"
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -28,6 +29,12 @@ std::ofstream sListOut;
 
 std::vector<ShaderId> sPending;
 std::vector<std::string> sPendingLabels;
+
+// PrepareArea: the area being faded towards, and what's left of its list.
+std::string sPreparedArea;
+std::vector<ShaderId> sTrickle;
+std::chrono::steady_clock::time_point sPreparedAt;
+int sGraceMs = 0;
 
 std::set<ShaderId> GlobalSetLocked() {
     std::map<ShaderId, size_t> areaCounts;
@@ -89,9 +96,55 @@ void EnterArea(const std::string& area) {
         return; // a room change inside the area: its shaders were compiled on the way in
     }
     sCurrentArea = area;
-    if (auto it = sByArea.find(area); it != sByArea.end()) {
+    if (area == sPreparedArea) {
+        // Whatever the fade didn't get to: compiled in the load's idle time or the first frame.
+        sPending.insert(sPending.end(), sTrickle.begin(), sTrickle.end());
+        sPendingLabels.push_back(area);
+        sTrickle.clear();
+    } else if (auto it = sByArea.find(area); it != sByArea.end()) {
         QueueLocked(it->second, area);
     }
+    sPreparedArea.clear();
+}
+
+void PrepareArea(const std::string& area, int graceMs) {
+    if (!sEnabled) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (area == sCurrentArea || area == sPreparedArea) {
+        return;
+    }
+    sPreparedArea = area;
+    sGraceMs = graceMs;
+    sPreparedAt = std::chrono::steady_clock::now();
+    sTrickle.clear();
+    if (auto it = sByArea.find(area); it != sByArea.end()) {
+        sTrickle.assign(it->second.begin(), it->second.end());
+    }
+}
+
+bool TakeOne(std::pair<uint64_t, uint64_t>& out, bool drawing) {
+    if (!sEnabled) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (drawing) {
+        if (sTrickle.empty() ||
+            std::chrono::steady_clock::now() - sPreparedAt < std::chrono::milliseconds(sGraceMs)) {
+            return false;
+        }
+        out = sTrickle.back();
+        sTrickle.pop_back();
+        return true;
+    }
+    auto& queue = !sTrickle.empty() ? sTrickle : sPending;
+    if (queue.empty()) {
+        return false;
+    }
+    out = queue.back();
+    queue.pop_back();
+    return true;
 }
 
 void RequestGlobal() {
