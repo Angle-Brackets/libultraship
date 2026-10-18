@@ -29,6 +29,8 @@
 
 #ifdef __SWITCH__
 #include <chrono>
+#include <cstring>
+#include <filesystem>
 // Read by the port's hitch monitor to attribute frame stalls to shader compiles.
 extern "C" {
 uint32_t gLusShaderCompileCount = 0;
@@ -535,14 +537,93 @@ void GfxRenderingAPIOGL::ClearShaderCache() {
     mShaderProgramPool.clear();
 }
 
-ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
 #ifdef __SWITCH__
-    const auto compileStart = std::chrono::steady_clock::now();
+// Compiling a combiner shader costs 40-100 ms on the Switch, a visible hitch at 60 fps.
+// Linked programs are kept as driver binaries under <app dir>/shadercache/, keyed on the
+// GLSL source and the driver, so each one is only ever compiled once.
+namespace {
+uint64_t Fnv1a64(uint64_t hash, const void* data, size_t len) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < len; i++) {
+        hash = (hash ^ bytes[i]) * 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+std::string ShaderBinaryCachePath(const std::string& vs_buf, const std::string& fs_buf) {
+    static const std::string dir = [] {
+        std::string d = Ship::Context::GetPathRelativeToAppDirectory("shadercache");
+        std::error_code ec;
+        std::filesystem::create_directories(d, ec);
+        return d;
+    }();
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (GLenum e : { GL_VENDOR, GL_RENDERER, GL_VERSION }) {
+        const char* str = reinterpret_cast<const char*>(glGetString(e));
+        h = Fnv1a64(h, str ? str : "", str ? strlen(str) : 0);
+    }
+    h = Fnv1a64(h, vs_buf.data(), vs_buf.size());
+    h = Fnv1a64(h, "\0", 1);
+    h = Fnv1a64(h, fs_buf.data(), fs_buf.size());
+    char name[32];
+    snprintf(name, sizeof(name), "/%016llx.bin", (unsigned long long)h);
+    return dir + name;
+}
+
+GLuint ShaderBinaryCacheLoad(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return 0;
+    }
+    GLenum format = 0;
+    in.read(reinterpret_cast<char*>(&format), sizeof(format));
+    std::vector<char> binary((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!in.eof() || binary.empty()) {
+        return 0;
+    }
+    GLuint program = glCreateProgram();
+    glProgramBinary(program, format, binary.data(), (GLsizei)binary.size());
+    GLint success = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (!success) {
+        // Stale (driver changed) or corrupt; recompile and overwrite.
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
+}
+
+void ShaderBinaryCacheStore(const std::string& path, GLuint program) {
+    GLint length = 0;
+    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+    if (length <= 0) {
+        return;
+    }
+    std::vector<char> binary(length);
+    GLenum format = 0;
+    glGetProgramBinary(program, length, &length, &format, binary.data());
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(&format), sizeof(format));
+        out.write(binary.data(), length);
+        if (!out.good()) {
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec); // fsdev rename() won't replace an existing file
+    std::filesystem::rename(tmp, path, ec);
+}
+} // namespace
+
+extern "C" {
+uint32_t gLusShaderCacheHits = 0;
+}
 #endif
-    CCFeatures cc_features;
-    gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
-    const auto fs_buf = BuildFsShader(cc_features);
-    const auto vs_buf = BuildVsShader(cc_features);
+
+static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string& fs_buf, uint64_t shader_id0,
+                                    uint64_t shader_id1) {
     const GLchar* sources[2] = { vs_buf.data(), fs_buf.data() };
     const GLint lengths[2] = { (GLint)vs_buf.size(), (GLint)fs_buf.size() };
     GLint success;
@@ -578,6 +659,9 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     GLuint shader_program = glCreateProgram();
     glAttachShader(shader_program, vertex_shader);
     glAttachShader(shader_program, fragment_shader);
+#ifdef __SWITCH__
+    glProgramParameteri(shader_program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+#endif
     glLinkProgram(shader_program);
 
     glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
@@ -590,6 +674,37 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
                      error_log.c_str());
         abort();
     }
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+    return shader_program;
+}
+
+ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+#ifdef __SWITCH__
+    const auto compileStart = std::chrono::steady_clock::now();
+#endif
+    CCFeatures cc_features;
+    gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
+    const auto fs_buf = BuildFsShader(cc_features);
+    const auto vs_buf = BuildVsShader(cc_features);
+
+    GLuint shader_program;
+#ifdef __SWITCH__
+    const std::string cachePath = ShaderBinaryCachePath(vs_buf, fs_buf);
+    shader_program = ShaderBinaryCacheLoad(cachePath);
+    if (shader_program != 0) {
+        gLusShaderCacheHits++;
+    } else {
+        shader_program = CompileAndLinkProgram(vs_buf, fs_buf, shader_id0, shader_id1);
+        ShaderBinaryCacheStore(cachePath, shader_program);
+        gLusShaderCompileCount++;
+        gLusShaderCompileMicros +=
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart)
+                .count();
+    }
+#else
+    shader_program = CompileAndLinkProgram(vs_buf, fs_buf, shader_id0, shader_id1);
+#endif
 
     size_t cnt = 0;
 
@@ -693,11 +808,6 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
         glUniform1i(sampler_location, SHADER_PALETTE_TEXTURE);
     }
 
-#ifdef __SWITCH__
-    gLusShaderCompileCount++;
-    gLusShaderCompileMicros +=
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart).count();
-#endif
     return prg;
 }
 
