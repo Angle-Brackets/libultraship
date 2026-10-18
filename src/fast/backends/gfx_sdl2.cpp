@@ -865,6 +865,16 @@ bool GfxWindowBackendSDL2::IsWindowVisible() {
     return true;
 }
 
+#ifdef __SWITCH__
+// Read by the port's hitch monitor; the monitor resets gLusSwapMaxMicros.
+extern "C" {
+uint32_t gLusPresentCount = 0;
+uint64_t gLusPaceMicros = 0; // SyncFramerateWithTime sleeping
+uint64_t gLusSwapMicros = 0; // SDL_GL_SwapWindow (vsync wait)
+uint64_t gLusSwapMaxMicros = 0;
+}
+#endif
+
 static uint64_t qpc_to_100ns(uint64_t qpc) {
     const uint64_t qpc_freq = SDL_GetPerformanceFrequency();
     return qpc / qpc_freq * _100NANOSECONDS_IN_SECOND + qpc % qpc_freq * _100NANOSECONDS_IN_SECOND / qpc_freq;
@@ -922,8 +932,24 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
         SDL_RenderSetVSync(mRenderer, mVsyncEnabled ? 1 : 0);
     }
 
+#ifdef __SWITCH__
+    const uint64_t paceStart = SDL_GetPerformanceCounter();
+    SyncFramerateWithTime();
+    const uint64_t swapStart = SDL_GetPerformanceCounter();
+    SDL_GL_SwapWindow(mWnd);
+    const uint64_t swapEnd = SDL_GetPerformanceCounter();
+    const uint64_t freq = SDL_GetPerformanceFrequency();
+    const uint64_t swapMicros = (swapEnd - swapStart) * 1000000 / freq;
+    gLusPresentCount++;
+    gLusPaceMicros += (swapStart - paceStart) * 1000000 / freq;
+    gLusSwapMicros += swapMicros;
+    if (swapMicros > gLusSwapMaxMicros) {
+        gLusSwapMaxMicros = swapMicros;
+    }
+#else
     SyncFramerateWithTime();
     SDL_GL_SwapWindow(mWnd);
+#endif
 }
 
 void GfxWindowBackendSDL2::SwapBuffersEnd() {

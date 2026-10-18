@@ -36,6 +36,28 @@
 #include "ship/utils/MemCheckpoint.h"
 #include "fast/ShaderPrewarm.h"
 #include "fast/lus_gbi.h"
+
+#ifdef __SWITCH__
+// Read by the port's hitch monitor: render-thread time in ImportTexture/ImportTextureMask
+// (cache lookups, decode and upload), including calls that hit the texture cache.
+extern "C" {
+uint32_t gLusTexImportCount = 0;
+uint64_t gLusTexImportMicros = 0;
+}
+namespace {
+struct TexImportTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~TexImportTimer() {
+        gLusTexImportCount++;
+        gLusTexImportMicros +=
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+    }
+};
+} // namespace
+#define LUS_TIME_TEX_IMPORT() TexImportTimer texImportTimer
+#else
+#define LUS_TIME_TEX_IMPORT()
+#endif
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
 
@@ -3089,6 +3111,7 @@ void Interpreter::UploadMipChain(uint32_t baseTile) {
 }
 
 void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
+    LUS_TIME_TEX_IMPORT();
     mImportTile = tile;
     mImportSlot = i;
     uint8_t fmt = mRdp->texture_tile[tile].fmt;
@@ -3272,6 +3295,7 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
 }
 
 void Interpreter::ImportTextureMask(int i, int tile) {
+    LUS_TIME_TEX_IMPORT();
     mImportSlot = i;
     uint32_t tmemIndex = mRdp->texture_tile[tile].tmem_index;
     RawTexMetadata metadata = mRdp->loaded_texture[tmemIndex].raw_tex_metadata;
