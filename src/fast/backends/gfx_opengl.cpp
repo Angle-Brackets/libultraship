@@ -1280,7 +1280,9 @@ void GfxRenderingAPIOGL::Init() {
             maxThreads(0xFFFFFFFF); // implementation-defined maximum
         }
         SPDLOG_WARN("[switch] GL: glMaxShaderCompilerThreadsKHR {}", maxThreads != nullptr ? "set to max" : "missing");
-        if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gSwitchAsyncShaders", 1)) {
+        // Off by default: on Mesa 20.1 nouveau a second compiling context deadlocked the render thread
+        // within a minute, and its compiles still blocked rendering while they ran (driver-wide lock).
+        if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gSwitchAsyncShaders", 0)) {
             const bool started = sAsyncShaderCompiler.Start();
             SPDLOG_WARN("[switch] async shaders: {}", started ? "background compiler running" : "off (inline)");
         } else {
