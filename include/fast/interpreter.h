@@ -614,6 +614,18 @@ class Interpreter {
     void GfxSpVertex(size_t numVertices, size_t destIndex, const F3DVtx* vertices);
     void GfxSpModifyVertex(uint16_t vtxIdx, uint8_t where, uint32_t val);
     void GfxSpTri1(uint8_t vtx1Idx, uint8_t vtx2Idx, uint8_t vtx3Idx, bool isRect);
+    // Appends a triangle to the current batch with the setup the last full GfxSpTri1 derived.
+    void AppendTriangle(LoadedVertex* const v_arr[3]);
+    // GfxSpTri1 fast path: the state generation is bumped by everything that can change what GfxSpTri1
+    // derives (non-geometry opcodes, light updates in GfxSpVertex, shader-scope pops, Run start). A
+    // triangle at the generation the last full setup ran at only appends its vertices.
+    uint64_t mTriStateGen = 1;
+    uint64_t mTriCacheGen = 0; // 0: no valid setup
+    uint32_t mFlushCount = 0;  // batches drawn (verify mode compares it around the setup)
+    struct {
+        bool usedTex[2];
+        bool normals, shade, alpha;
+    } mTriFast{};
     void GfxSpGeometryMode(uint32_t clear, uint32_t set);
     void GfxSpExtraGeometryMode(uint32_t clear, uint32_t set);
     void GfxSpMovememF3dex2(uint8_t index, uint8_t offset, const void* data);
