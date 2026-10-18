@@ -32,6 +32,7 @@
 #include <string>
 
 #include "fast/interpreter.h"
+#include "ship/utils/MemCheckpoint.h"
 #include "fast/lus_gbi.h"
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -1685,6 +1686,8 @@ void Interpreter::ImportTextureRgba16(int tile, bool importReplacement) {
         fullImageLineSizeBytes = width * 2;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
 
     for (uint32_t y = 0; y < height; y++) {
@@ -1759,6 +1762,8 @@ void Interpreter::ImportTextureRgba32(int tile, bool importReplacement) {
 
     // Copy pixel by pixel, respecting full image stride (handles sub-tile loads)
     uint32_t fullImageStridePixels = full_image_line_size_bytes / 4;
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)size_bytes * 2) * 4);
     uint32_t i = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
@@ -1797,6 +1802,8 @@ void Interpreter::ImportTextureIA4(int tile, bool importReplacement) {
         fullImageLineSizeBytes = widthBytes;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
@@ -1839,6 +1846,8 @@ void Interpreter::ImportTextureIA8(int tile, bool importReplacement) {
         fullImageLineSizeBytes = width;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
@@ -1881,6 +1890,8 @@ void Interpreter::ImportTextureIA16(int tile, bool importReplacement) {
         full_image_line_size_bytes = width * 2;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)size_bytes * 2) * 4);
     uint32_t i = 0;
 
     for (uint32_t y = 0; y < height; y++) {
@@ -1929,6 +1940,8 @@ void Interpreter::ImportTextureI4(int tile, bool importReplacement) {
         fullImageLineSizeBytes = width / 2;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
 
     for (uint32_t y = 0; y < height; y++) {
@@ -1977,6 +1990,8 @@ void Interpreter::ImportTextureI8(int tile, bool importReplacement) {
         fullImageLineSizeBytes = width;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
@@ -2060,6 +2075,8 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
         fullImageLineSizeBytes = resultLineSizeBytes;
     }
 
+    // Loops are bounded by both the tile size and the loaded byte count.
+    EnsureTexUploadBuffer(std::max<size_t>((size_t)width * height, (size_t)sizeBytes * 2) * 4);
     uint32_t i = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
@@ -2113,6 +2130,7 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
         return;
     }
 
+    EnsureTexUploadBuffer((size_t)sizeBytes * 4);
     for (uint32_t i = 0, j = 0; i < sizeBytes; j += fullImageLineSizeBytes - lineSizeBytes) {
         for (uint32_t k = 0; k < lineSizeBytes; i++, k++, j++) {
             uint8_t idx = addr[j];
@@ -2293,6 +2311,7 @@ bool Interpreter::UploadVanillaCi(int tile) {
     uint32_t height = region.height;
     const size_t start = (size_t)region.y * region.strideBytes + region.xBytes;
     const uint8_t* src = base->ImageData + start;
+    EnsureTexUploadBuffer((size_t)width * height * 4);
     const PaletteMask* mask = mImportIndexed ? TilePaletteMask(tile) : nullptr;
     if (mask != nullptr) {
         // The replacement's own silhouette, as indices: the mask then lines up with the HD
@@ -2314,6 +2333,7 @@ bool Interpreter::UploadVanillaCi(int tile) {
         if (width == 0 || height == 0) {
             return false;
         }
+        EnsureTexUploadBuffer((size_t)width * height * 4);
         uint8_t* dst = mTexUploadBuffer;
         for (uint32_t y = 0; y < height; y++) {
             const uint8_t* row = hd + (size_t)y * stride * 4;
@@ -2449,6 +2469,7 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
         safeLoadedBytes = std::min<uint32_t>(safeLoadedBytes, rows * safeLineSizeBytes);
     }
 
+    EnsureTexUploadBuffer(std::max<size_t>(packedBytes, numLoadedBytes));
     // Safely only copy the amount of bytes the resource can allow
     for (uint32_t i = 0, j = 0; i < safeLoadedBytes; i += safeLineSizeBytes, j += safeFullImageLineSizeBytes) {
         memcpy(mTexUploadBuffer + i, addr + j, safeLineSizeBytes);
@@ -3037,6 +3058,7 @@ void Interpreter::UploadMipChain(uint32_t baseTile) {
                     // RGBA32 tiles store the TMEM-interleaved stride (half of the DRAM stride)
                     strideBytes *= 2;
                 }
+                EnsureTexUploadBuffer((size_t)width * height * 4);
                 if (strideBytes > 0 && DecodeTileToRgba32(t.fmt, t.siz, src, strideBytes, width, height, mRdp->palettes,
                                                           basePalette, mTexUploadBuffer)) {
                     levelPixels = mTexUploadBuffer;
@@ -3287,6 +3309,7 @@ void Interpreter::ImportTextureMask(int i, int tile) {
             break;
     }
 
+    EnsureTexUploadBuffer((size_t)width * height * 4);
     for (uint32_t texIndex = 0; texIndex < width * height; texIndex++) {
         uint8_t masked = orig_addr[texIndex];
         if (masked) {
@@ -7666,6 +7689,7 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
     mRapi = rapi;
     mWapi->Init(game_name, rapi->GetName(), start_in_fullscreen, width, height, posX, posY);
     mRapi->Init();
+    LUS_MEM_CHECKPOINT("  GL renderer init");
     mRapi->UpdateFramebufferParameters(0, width, height, 1, false, true, true, true);
     mCurDimensions.internal_mul =
         Ship::Context::GetRawInstance()->GetConsoleVariables()->GetFloat(CVAR_INTERNAL_RESOLUTION, 1);
@@ -7676,6 +7700,7 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
 
     mGameFb = mRapi->CreateFramebuffer();
     mGameFbMsaaResolved = mRapi->CreateFramebuffer();
+    LUS_MEM_CHECKPOINT("  framebuffers");
 
     mNativeDimensions.width = SCREEN_WIDTH;
     mNativeDimensions.height = SCREEN_HEIGHT;
@@ -7685,21 +7710,45 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
     }
 
     if (mTexUploadBuffer == nullptr) {
+#ifdef __SWITCH__
+        // 8k^2 RGBA is 256 MiB up front; N64 textures are tiny, so start at 1k^2 and grow on demand.
+        EnsureTexUploadBuffer(1024 * 1024 * 4);
+#else
         // We cap texture max to 8k, because why would you need more?
         int max_tex_size = std::min(8192, mRapi->GetMaxTextureSize());
-        mTexUploadBuffer = (uint8_t*)malloc(max_tex_size * max_tex_size * 4);
+        EnsureTexUploadBuffer((size_t)max_tex_size * max_tex_size * 4);
+#endif
     }
 
+    LUS_MEM_CHECKPOINT("  tex upload buffer");
     ucode_handler_index = UcodeHandlers::ucode_f3dex2;
 
     // Pre-allocate texture cache buckets to prevent rehash-induced iterator invalidation.
     mTextureCacheMaxSize = TEXTURE_CACHE_MAX_SIZE;
     mTextureCache.map.reserve(mTextureCacheMaxSize);
+    LUS_MEM_CHECKPOINT("  texture cache reserve");
+}
+
+void Interpreter::EnsureTexUploadBuffer(size_t bytes) {
+    if (bytes <= mTexUploadBufferSize) {
+        return;
+    }
+    // Round up so a run of slightly larger textures doesn't realloc every time.
+    size_t newSize = std::max(bytes, mTexUploadBufferSize * 2);
+    uint8_t* grown = (uint8_t*)realloc(mTexUploadBuffer, newSize);
+    if (grown == nullptr) {
+        SPDLOG_CRITICAL("Failed to grow texture upload buffer to {} bytes", newSize);
+        abort();
+    }
+    mTexUploadBuffer = grown;
+    mTexUploadBufferSize = newSize;
 }
 
 void Interpreter::Destroy() {
     // TODO: should also destroy rapi, and any other resources acquired in fast3d
     free(mTexUploadBuffer);
+    mTexUploadBuffer = nullptr;
+    mTexUploadBufferSize = 0;
     mWapi->Destroy();
 
     // Texture cache and loaded textures store references to Resources which need to be unreferenced.

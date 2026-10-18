@@ -15,6 +15,7 @@
 #include "ship/controller/controldeck/ControlDeck.h"
 #include "ship/window/FileDropMgr.h"
 #include "fast/backends/gfx_sdl.h"
+#include "ship/utils/MemCheckpoint.h"
 
 #ifdef __OpenBSD__
 #include <sys/sysctl.h>
@@ -389,6 +390,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
 #endif
 
     SDL_Init(SDL_INIT_VIDEO);
+    LUS_MEM_CHECKPOINT("  SDL video init");
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
@@ -472,6 +474,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     }
 #endif
     mWnd = SDL_CreateWindow(title, posX, posY, mWindowWidth, mWindowHeight, flags);
+    LUS_MEM_CHECKPOINT("  SDL window");
 #ifdef __EMSCRIPTEN__
     em_ui_callback_func onCanvasResize = [](int, const EmscriptenUiEvent*, void* userData) -> EM_BOOL {
         auto backend = static_cast<GfxWindowBackendSDL2*>(userData);
@@ -525,6 +528,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
             SPDLOG_ERROR("gladLoadGL failed");
         }
 #endif
+        LUS_MEM_CHECKPOINT("  GL context + glad");
         SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
 
         window_impl.Opengl = { mWnd, mCtx };
@@ -566,6 +570,7 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
 
     std::dynamic_pointer_cast<Fast::Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())
         ->Init(window_impl);
+    LUS_MEM_CHECKPOINT("  ImGui init");
 
     for (size_t i = 0; i < std::size(lus_to_sdl_table); i++) {
         mSdlToLusTable[lus_to_sdl_table[i]] = i;

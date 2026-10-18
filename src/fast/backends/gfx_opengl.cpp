@@ -1098,6 +1098,27 @@ void GfxRenderingAPIOGL::Init() {
 #if defined(__SWITCH__)
     // switch-glad resolves its entry points through eglGetProcAddress.
     gladLoadGL();
+    {
+        // Whether driver binaries can be saved at all (Mesa needs its disk cache for this),
+        // and whether the driver can compile shaders off-thread by itself.
+        GLint binaryFormats = 0;
+        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &binaryFormats);
+        GLint numExtensions = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &numExtensions);
+        bool parallelCompile = false;
+        for (GLint i = 0; i < numExtensions; i++) {
+            const char* ext = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
+            if (ext != nullptr && (strcmp(ext, "GL_KHR_parallel_shader_compile") == 0 ||
+                                   strcmp(ext, "GL_ARB_parallel_shader_compile") == 0)) {
+                parallelCompile = true;
+            }
+        }
+        SPDLOG_WARN("[switch] GL: {} | {} | {}", reinterpret_cast<const char*>(glGetString(GL_VENDOR)),
+                    reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
+                    reinterpret_cast<const char*>(glGetString(GL_VERSION)));
+        SPDLOG_WARN("[switch] GL: program binary formats = {}, parallel shader compile = {}", binaryFormats,
+                    parallelCompile ? "yes" : "no");
+    }
 #elif !defined(__linux__) && !defined(__OpenBSD__) && !defined(USE_OPENGLES)
     glewInit();
 #endif

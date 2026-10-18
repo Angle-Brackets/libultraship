@@ -758,6 +758,9 @@ class Interpreter {
     // Per-draw palette parameters: x = palette bank entry offset, y = filter mode
     float mPaletteParams[2][4]{};
     uint8_t* mTexUploadBuffer = nullptr;
+    size_t mTexUploadBufferSize = 0;
+    // Grows mTexUploadBuffer to at least `bytes`; call before writing a decoded texture into it.
+    void EnsureTexUploadBuffer(size_t bytes);
     // Mip chain built on the frame when the resource has none
     std::vector<Fast::Texture::MipLevel> mMipChainScratch;
 
