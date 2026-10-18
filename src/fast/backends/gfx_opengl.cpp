@@ -651,8 +651,8 @@ static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string
     linkStatus = MillisSince(t);
     if (probe) {
         sShaderTimingProbed++;
-        // MillisSince(t) is cumulative, so each stage is the difference from the previous one.
-        const double vsMs = vsStatus, fsMs = fsStatus - vsStatus, linkMs = linkStatus - fsStatus;
+        // MillisSince(t) restarts t, so each value is one step; a stage is its call + status query.
+        const double vsMs = vsCall + vsStatus, fsMs = fsCall + fsStatus, linkMs = linkCall + linkReady + linkStatus;
         sProbeVsMs += vsMs;
         sProbeFsMs += fsMs;
         sProbeLinkMs += linkMs;
@@ -660,10 +660,6 @@ static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string
                     "(ready={}) | totals vs {:.0f} fs {:.0f} link {:.0f} ms",
                     sShaderTimingProbed, shader_id0, shader_id1, vsMs, vs_buf.size(), fsMs, fs_buf.size(), linkMs,
                     ready ? "yes" : "no", sProbeVsMs, sProbeFsMs, sProbeLinkMs);
-        (void) vsCall;
-        (void) fsCall;
-        (void) linkCall;
-        (void) linkReady;
     }
 #endif
     if (!success) {
