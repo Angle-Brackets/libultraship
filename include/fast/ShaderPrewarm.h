@@ -30,6 +30,8 @@ void PrepareArea(const std::string& area, int graceMs);
 // Window thread, between frames: one shader to compile now. `drawing` = the game is presenting
 // frames, so only a prepared area's shaders (past its grace period) are given out.
 bool TakeOne(std::pair<uint64_t, uint64_t>& out, bool drawing);
+// Any thread: shaders are still queued (prepared or pending), some possibly already built.
+bool Busy();
 
 // Render thread: a combiner was bound for drawing.
 void NoteUse(uint64_t id0, uint64_t id1);

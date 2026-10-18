@@ -175,6 +175,14 @@ void NoteUse(uint64_t id0, uint64_t id1) {
     }
 }
 
+bool Busy() {
+    if (!sEnabled) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    return !sTrickle.empty() || !sPending.empty();
+}
+
 bool TakePending(std::vector<std::pair<uint64_t, uint64_t>>& out, std::string& label) {
     if (!sEnabled) {
         return false;
