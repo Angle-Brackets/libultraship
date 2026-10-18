@@ -56,6 +56,7 @@ uint64_t gLusGpuMaxMicros = 0;
 // CPU time in DrawTriangles spent on per-draw uniforms and the vertex buffer upload (running totals).
 uint64_t gLusUniformMicros = 0;
 uint64_t gLusVboMicros = 0;
+uint64_t gLusVboMaxMicros = 0; // longest single upload; the reader resets it
 }
 
 #ifndef GL_COMPLETION_STATUS_KHR
@@ -1285,12 +1286,27 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
         glBufferData(GL_ARRAY_BUFFER, std::max(kVboStreamBytes, bytes), nullptr, GL_STREAM_DRAW);
         first = 0;
     }
-    glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
+    // Unsynchronized: this range hasn't been drawn from since the orphan, so the driver must not wait for
+    // the GPU to finish with the buffer (glBufferSubData on a busy buffer may).
+    void* dst = glMapBufferRange != nullptr
+                    ? glMapBufferRange(GL_ARRAY_BUFFER, first * stride, bytes,
+                                       GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT)
+                    : nullptr;
+    if (dst != nullptr) {
+        memcpy(dst, buf_vbo, bytes);
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+    } else {
+        glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
+    }
     mVboOffset = first * stride + bytes;
     const GLint firstVertex = (GLint) first;
 #ifdef __SWITCH__
-    gLusVboMicros +=
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
+    {
+        const uint64_t us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
+        gLusVboMicros += us;
+        gLusVboMaxMicros = std::max(gLusVboMaxMicros, us);
+    }
 #endif
 
     if (mCurrentZmodeDecal && !mCurrentStrictDecal && mCurrentDepthTest) {

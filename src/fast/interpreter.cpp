@@ -54,6 +54,7 @@ uint32_t gLusTexSame = 0;
 uint32_t gLusPalUploads = 0;
 uint32_t gLusPrgSwitch = 0;
 uint64_t gLusDrawMicros = 0;
+uint64_t gLusDrawMaxMicros = 0; // longest single backend draw; the reader resets it
 uint32_t gLusFlushWhy[8] = {}; // tex, cc, prg, unif, mtx, light, pal, other
 }
 namespace {
@@ -204,8 +205,10 @@ void Interpreter::Flush() {
 #endif
         mRapi->DrawTriangles(mBufVbo, mBufVboLen, mBufVboNumTris);
 #ifdef __SWITCH__
-        gLusDrawMicros +=
+        const uint64_t drawUs =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawStart).count();
+        gLusDrawMicros += drawUs;
+        gLusDrawMaxMicros = std::max(gLusDrawMaxMicros, drawUs);
         gLusDraws++;
         gLusTris += mBufVboNumTris;
         gLusFlushWhy[sFlushWhy]++;
