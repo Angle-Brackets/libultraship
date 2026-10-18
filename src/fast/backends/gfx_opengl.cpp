@@ -765,6 +765,11 @@ void GfxRenderingAPIOGL::UploadTextureMip(const uint8_t* rgba32_buf, uint32_t wi
 #define GL_MIRROR_CLAMP_TO_EDGE GL_MIRRORED_REPEAT
 #endif
 
+#if defined(__SWITCH__) && !defined(GL_MIRROR_CLAMP_TO_EDGE)
+// switch-glad stops at GL 4.3; the enum is core in 4.4 and nouveau supports it
+#define GL_MIRROR_CLAMP_TO_EDGE 0x8743
+#endif
+
 static uint32_t gfx_cm_to_opengl(uint32_t val) {
     switch (val) {
         case G_TX_NOMIRROR | G_TX_CLAMP:
@@ -963,7 +968,10 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 }
 
 void GfxRenderingAPIOGL::Init() {
-#if !defined(__linux__) && !defined(__OpenBSD__) && !defined(USE_OPENGLES)
+#if defined(__SWITCH__)
+    // switch-glad resolves its entry points through eglGetProcAddress.
+    gladLoadGL();
+#elif !defined(__linux__) && !defined(__OpenBSD__) && !defined(USE_OPENGLES)
     glewInit();
 #endif
 
