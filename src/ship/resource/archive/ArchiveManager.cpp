@@ -230,6 +230,16 @@ const char* ArchiveManager::HashToCString(uint64_t hash) const {
     return hashStr != nullptr ? hashStr->c_str() : nullptr;
 }
 
+// std::filesystem::absolute treats newlib device paths ("romfs:/x", "sdmc:/x") as relative and
+// prefixes the working directory; those are already absolute.
+static std::string AbsolutePath(const std::filesystem::path& path) {
+    const std::string str = path.string();
+    if (str.find(":/") != std::string::npos) {
+        return str;
+    }
+    return std::filesystem::absolute(path).string();
+}
+
 std::vector<std::string> ArchiveManager::GetArchiveListInPaths(const std::vector<std::string>& archivePaths) {
     std::vector<std::string> fileList = {};
 
@@ -242,18 +252,18 @@ std::vector<std::string> ArchiveManager::GetArchiveListInPaths(const std::vector
                         StringHelper::IEquals(p.path().extension().string(), ".zip") ||
                         StringHelper::IEquals(p.path().extension().string(), ".mpq") ||
                         StringHelper::IEquals(p.path().extension().string(), ".o2r")) {
-                        fileList.push_back(std::filesystem::absolute(p).string());
+                        fileList.push_back(AbsolutePath(p.path()));
                         hasAssetFiles = true;
                     }
                 }
 
                 if (!hasAssetFiles) {
-                    fileList.push_back(std::filesystem::absolute(archivePath).string());
+                    fileList.push_back(AbsolutePath(archivePath));
                 }
             } else if (std::filesystem::is_regular_file(archivePath)) {
-                fileList.push_back(std::filesystem::absolute(archivePath).string());
+                fileList.push_back(AbsolutePath(archivePath));
             } else {
-                SPDLOG_WARN("The archive at path {} does not exist", std::filesystem::absolute(archivePath).string());
+                SPDLOG_WARN("The archive at path {} does not exist", AbsolutePath(archivePath));
             }
         } else {
             SPDLOG_WARN("No archive path supplied");
