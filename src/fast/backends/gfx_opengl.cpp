@@ -53,6 +53,9 @@ uint32_t gLusGpuDropped = 0; // ring full: not measured (never waits)
 uint64_t gLusGpuMicros = 0;
 uint64_t gLusGpuGameMicros = 0; // up to the composite (final blit + ImGui)
 uint64_t gLusGpuMaxMicros = 0;
+// CPU time in DrawTriangles spent on per-draw uniforms and the vertex buffer upload (running totals).
+uint64_t gLusUniformMicros = 0;
+uint64_t gLusVboMicros = 0;
 }
 
 #ifndef GL_COMPLETION_STATUS_KHR
@@ -1233,10 +1236,22 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
         }
     }
 
+#ifdef __SWITCH__
+    auto t = std::chrono::steady_clock::now();
+#endif
     SetPerDrawUniforms();
+#ifdef __SWITCH__
+    const auto tUnif = std::chrono::steady_clock::now();
+    gLusUniformMicros += std::chrono::duration_cast<std::chrono::microseconds>(tUnif - t).count();
+    t = tUnif;
+#endif
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
+#ifdef __SWITCH__
+    gLusVboMicros +=
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
+#endif
 
     if (mCurrentZmodeDecal && !mCurrentStrictDecal && mCurrentDepthTest) {
         // The RDP draws a decal only where the depth buffer already holds a surface close

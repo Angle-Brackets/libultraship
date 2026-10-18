@@ -208,6 +208,7 @@ void Fast3dWindow::EndFrame() {
 extern "C" {
 uint64_t gLusRenderCpuMicros = 0;
 uint64_t gLusRenderCpuMaxMicros = 0;
+uint64_t gLusRunMicros = 0; // Interpreter::Run alone (game display lists, no GUI)
 }
 #endif
 
@@ -245,7 +246,14 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
     // Setup game framebuffers to match available window space
     mInterpreter->StartFrame();
     // Execute the games gfx commands
+#ifdef __SWITCH__
+    const auto runStart = std::chrono::steady_clock::now();
+#endif
     mInterpreter->Run(commands, mtxReplacements, dlReplacements);
+#ifdef __SWITCH__
+    gLusRunMicros +=
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - runStart).count();
+#endif
     // Renders the game frame buffer to the final window and finishes the GUI
     gui->EndDraw();
 #ifdef __SWITCH__

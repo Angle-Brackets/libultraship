@@ -43,8 +43,23 @@
 extern "C" {
 uint32_t gLusTexImportCount = 0;
 uint64_t gLusTexImportMicros = 0;
+// Render-cost attribution (running totals; the reader divides by presents). Draws/tris are backend
+// draws issued by Flush; tex miss = real cache imports, tex same = cache hits on the texture
+// already bound in that slot (redundant rebinds). gLusFlushWhy buckets what ended each batch.
+uint32_t gLusDraws = 0;
+uint32_t gLusTris = 0;
+uint32_t gLusOps = 0;
+uint32_t gLusTexMiss = 0;
+uint32_t gLusTexSame = 0;
+uint32_t gLusPalUploads = 0;
+uint32_t gLusPrgSwitch = 0;
+uint64_t gLusDrawMicros = 0;
+uint32_t gLusFlushWhy[8] = {}; // tex, cc, prg, unif, mtx, light, pal, other
 }
 namespace {
+enum LusFlushWhy { kWhyTex, kWhyCc, kWhyPrg, kWhyUnif, kWhyMtx, kWhyLight, kWhyPal, kWhyOther };
+// Reason for the next Flush; set just before the batch-breaking Flush calls in GfxSpTri1.
+uint8_t sFlushWhy = kWhyOther;
 struct TexImportTimer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     ~TexImportTimer() {
@@ -55,8 +70,12 @@ struct TexImportTimer {
 };
 } // namespace
 #define LUS_TIME_TEX_IMPORT() TexImportTimer texImportTimer
+#define LUS_FLUSH_WHY(why) (sFlushWhy = (why))
+#define LUS_COUNT(counter) ((counter)++)
 #else
 #define LUS_TIME_TEX_IMPORT()
+#define LUS_FLUSH_WHY(why)
+#define LUS_COUNT(counter)
 #endif
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -180,13 +199,24 @@ void Interpreter::Flush() {
         LatchCombinerUniforms();
         mRapi->SetTransformUniforms(mTransform);
         mRapi->SetCustomUniforms(mCustomUniforms);
+#ifdef __SWITCH__
+        const auto drawStart = std::chrono::steady_clock::now();
+#endif
         mRapi->DrawTriangles(mBufVbo, mBufVboLen, mBufVboNumTris);
+#ifdef __SWITCH__
+        gLusDrawMicros +=
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawStart).count();
+        gLusDraws++;
+        gLusTris += mBufVboNumTris;
+        gLusFlushWhy[sFlushWhy]++;
+#endif
         mBufVboLen = 0;
         mBufVboNumTris = 0;
         // Palette slots are assigned per batch; the next batch starts empty
         memset(mBatchSlotForHistory, -1, sizeof(mBatchSlotForHistory));
         mBatchMtxCount = 0;
     }
+    LUS_FLUSH_WHY(kWhyOther);
 }
 
 // Record a model-view-projection matrix (with the widescreen aspect scale folded
@@ -735,7 +765,9 @@ uint32_t Interpreter::AcquirePaletteTexture() {
 
     // New TLUT content: the upload below rebinds texture slot 6, so draw any
     // queued triangles first (they were packed against the previous palette).
+    LUS_FLUSH_WHY(kWhyPal);
     Flush();
+    LUS_COUNT(gLusPalUploads);
 
     // Reuse a slot not touched this frame; recycling one still referenced by a queued
     // draw would recolor it on deferred backends. All slots used (>ring size) reuses the cursor.
@@ -1183,6 +1215,12 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     TextureCacheNode** n = &mRenderingState.mTextures[i];
 
     if (it != mTextureCache.map.end()) {
+#ifdef __SWITCH__
+        // Slot already holds this cache entry: the import that got here was redundant.
+        if (*n == &*it) {
+            gLusTexSame++;
+        }
+#endif
         mRapi->SelectTexture(i, it->second.texture_id);
         *n = &*it;
         mTextureCache.lru.splice(mTextureCache.lru.end(), mTextureCache.lru,
@@ -1190,6 +1228,7 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
         return true;
     }
 
+    LUS_COUNT(gLusTexMiss);
     if (mTextureCache.map.size() >= mTextureCacheMaxSize) {
         TextureCacheEvictOldest();
     }
@@ -3819,6 +3858,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     // Different combiners can share a shader program but map different RDP
     // registers into the uniform slots; never mix them in one batch.
     if (mPendingCombiner != comb) {
+        LUS_FLUSH_WHY(kWhyCc);
         Flush();
         mPendingCombiner = comb;
     }
@@ -3861,6 +3901,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                 mRdp->textures_changed[i] = true;
             }
             if (mRdp->textures_changed[i]) {
+                LUS_FLUSH_WHY(kWhyTex);
                 Flush();
                 // Only the base texture slot carries a mip chain; masks and
                 // replacements are always uploaded as single-level textures.
@@ -3993,6 +4034,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             }
             if (linear_filter != mRenderingState.mTextures[i]->second.linear_filter ||
                 cms != mRenderingState.mTextures[i]->second.cms || cmt != mRenderingState.mTextures[i]->second.cmt) {
+                LUS_FLUSH_WHY(kWhyTex); // sampler state of the bound texture
                 Flush();
 
                 // Set the same sampler params on the blended texture. Needed for opengl.
@@ -4014,6 +4056,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     if (palettized[0] || palettized[1]) {
         const uint32_t palTexture = AcquirePaletteTexture();
         if (palTexture != mBoundPaletteTexture) {
+            LUS_FLUSH_WHY(kWhyPal);
             Flush();
             mBoundPaletteTexture = palTexture;
         }
@@ -4029,6 +4072,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         }
     }
     if (prg != mRenderingState.mShaderProgram) {
+        LUS_FLUSH_WHY(kWhyPrg);
+        LUS_COUNT(gLusPrgSwitch);
         Flush();
         mRapi->UnloadShader(mRenderingState.mShaderProgram);
         mRapi->LoadShader(prg);
@@ -4143,6 +4188,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         }
 
         if (memcmp(&lu, &mLatchedLighting, sizeof(LightingUniforms)) != 0) {
+            LUS_FLUSH_WHY(kWhyLight);
             Flush();
             mLatchedLighting = lu;
         }
@@ -4252,6 +4298,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             memcmp(fogParams, mFogParams, sizeof(fogParams)) != 0 ||
             memcmp(paletteParams, mPaletteParams, sizeof(paletteParams)) != 0 ||
             memcmp(lodParams, mLodParams, sizeof(lodParams)) != 0) {
+            LUS_FLUSH_WHY(kWhyUnif);
             Flush();
             memcpy(mUvTransform, uvTransform, sizeof(uvTransform));
             memcpy(mTextureClamp, texClamp, sizeof(texClamp));
@@ -4280,6 +4327,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             int8_t slot = mBatchSlotForHistory[h];
             if (slot < 0) {
                 if (mBatchMtxCount == GFX_MTX_PALETTE_SIZE) {
+                    LUS_FLUSH_WHY(kWhyMtx);
                     Flush();
                     flushed = true;
                     break;
@@ -7625,6 +7673,7 @@ static void gfx_step() {
     auto& cmd = g_exec_stack.currCmd();
     auto cmd0 = cmd;
     int8_t opcode = (int8_t)(cmd->words.w0 >> 24);
+    LUS_COUNT(gLusOps);
 
 #ifdef USE_GBI_TRACE
     if (cmd->words.trace.valid &&
