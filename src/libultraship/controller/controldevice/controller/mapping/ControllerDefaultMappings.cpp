@@ -75,6 +75,10 @@ void ControllerDefaultMappings::SetDefaultSDLButtonToButtonMappings(
         { BTN_A, { SDL_CONTROLLER_BUTTON_A } },
         { BTN_B, { SDL_CONTROLLER_BUTTON_B } },
         { BTN_L, { SDL_CONTROLLER_BUTTON_LEFTSHOULDER } },
+#ifdef __SWITCH__
+        // N64 R also sits on ZR (axis defaults below); without this the R bumper is dead.
+        { BTN_R, { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER } },
+#endif
         { BTN_START, { SDL_CONTROLLER_BUTTON_START } },
         { BTN_DUP, { SDL_CONTROLLER_BUTTON_DPAD_UP } },
         { BTN_DDOWN, { SDL_CONTROLLER_BUTTON_DPAD_DOWN } },
