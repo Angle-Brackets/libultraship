@@ -1,5 +1,6 @@
 #include "fast/ShaderPrewarm.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -36,6 +37,75 @@ std::vector<ShaderId> sTrickle;
 std::chrono::steady_clock::time_point sPreparedAt;
 int sGraceMs = 0;
 
+// Area links: how often `to` followed `from`. Each traversal is appended until this many.
+constexpr uint32_t kMaxLinkLines = 32;
+std::map<std::string, std::map<std::string, uint32_t>> sLinks;
+std::map<std::string, std::string> sValues;
+std::vector<ShaderId> sBackground; // most likely at the back
+// Handed out by TakeOne/TakePending, so compiled (the program pool never evicts).
+std::set<ShaderId> sHanded;
+
+std::vector<std::string> LinksByCountLocked(const std::string& from) {
+    std::vector<std::pair<uint32_t, std::string>> counted;
+    if (auto it = sLinks.find(from); it != sLinks.end()) {
+        for (const auto& [to, count] : it->second) {
+            counted.push_back({ count, to });
+        }
+    }
+    std::sort(counted.rbegin(), counted.rend());
+    std::vector<std::string> out;
+    for (const auto& [count, to] : counted) {
+        out.push_back(to);
+    }
+    return out;
+}
+
+// Background order: the seeds, their links by count, then every other known area.
+void BuildBackgroundLocked(const std::vector<std::string>& seeds) {
+    std::vector<std::string> order;
+    std::set<std::string> seen { sCurrentArea };
+    auto add = [&](const std::string& area) {
+        if (seen.insert(area).second) {
+            order.push_back(area);
+        }
+    };
+    for (const auto& seed : seeds) {
+        add(seed);
+    }
+    for (const auto& seed : seeds) {
+        for (const auto& to : LinksByCountLocked(seed)) {
+            add(to);
+        }
+    }
+    for (const auto& [area, ids] : sByArea) {
+        add(area);
+    }
+    std::set<ShaderId> queued;
+    std::vector<ShaderId> inOrder;
+    for (const auto& area : order) {
+        if (auto it = sByArea.find(area); it != sByArea.end()) {
+            for (const auto& id : it->second) {
+                if (!sHanded.count(id) && queued.insert(id).second) {
+                    inOrder.push_back(id);
+                }
+            }
+        }
+    }
+    sBackground.assign(inOrder.rbegin(), inOrder.rend());
+}
+
+// Skips shaders already handed out.
+bool PopLocked(std::vector<ShaderId>& queue, ShaderId& out) {
+    while (!queue.empty()) {
+        out = queue.back();
+        queue.pop_back();
+        if (sHanded.insert(out).second) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::set<ShaderId> GlobalSetLocked() {
     std::map<ShaderId, size_t> areaCounts;
     for (const auto& [area, ids] : sByArea) {
@@ -70,6 +140,18 @@ void Init(const std::string& listPath) {
         while (std::getline(in, line)) {
             std::istringstream fields(line);
             std::string area;
+            // "@ next <from> <to>" / "@ set <key> <value>". Older builds skip these lines: "n"/"s"
+            // aren't hex digits, so their "<area> <hex> <hex>" parse fails.
+            if (line.rfind("@ ", 0) == 0) {
+                std::string at, kind, a, b;
+                fields >> at >> kind >> a >> b;
+                if (kind == "next" && !b.empty()) {
+                    sLinks[a][b]++;
+                } else if (kind == "set" && !a.empty()) {
+                    sValues[a] = b;
+                }
+                continue;
+            }
             uint64_t id0 = 0, id1 = 0;
             if (fields >> area >> std::hex >> id0 >> id1) {
                 sByArea[area].insert({ id0, id1 });
@@ -105,6 +187,50 @@ void EnterArea(const std::string& area) {
         QueueLocked(it->second, area);
     }
     sPreparedArea.clear();
+    // Battles have no links of their own: keep the world area's background through them.
+    if (sLinks.count(area) || sBackground.empty()) {
+        BuildBackgroundLocked(LinksByCountLocked(area));
+    }
+}
+
+void NoteLink(const std::string& from, const std::string& to) {
+    if (!sEnabled || from.empty() || to.empty() || from == to) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (++sLinks[from][to] <= kMaxLinkLines && sListOut) {
+        sListOut << "@ next " << from << ' ' << to << '\n';
+        sListOut.flush();
+    }
+}
+
+void Hint(const std::vector<std::string>& areas) {
+    if (!sEnabled) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    BuildBackgroundLocked(areas);
+}
+
+void Remember(const std::string& key, const std::string& value) {
+    if (!sEnabled || key.empty() || value.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(sMutex);
+    if (sValues[key] == value) {
+        return;
+    }
+    sValues[key] = value;
+    if (sListOut) {
+        sListOut << "@ set " << key << ' ' << value << '\n';
+        sListOut.flush();
+    }
+}
+
+std::string Recall(const std::string& key) {
+    std::lock_guard<std::mutex> lock(sMutex);
+    auto it = sValues.find(key);
+    return it == sValues.end() ? std::string() : it->second;
 }
 
 void PrepareArea(const std::string& area, int graceMs) {
@@ -124,27 +250,23 @@ void PrepareArea(const std::string& area, int graceMs) {
     }
 }
 
-bool TakeOne(std::pair<uint64_t, uint64_t>& out, bool drawing) {
+bool TakeOne(std::pair<uint64_t, uint64_t>& out, bool drawing, bool allowBackground) {
     if (!sEnabled) {
         return false;
     }
     std::lock_guard<std::mutex> lock(sMutex);
     if (drawing) {
-        if (sTrickle.empty() ||
-            std::chrono::steady_clock::now() - sPreparedAt < std::chrono::milliseconds(sGraceMs)) {
-            return false;
+        if (!sTrickle.empty()) {
+            if (std::chrono::steady_clock::now() - sPreparedAt < std::chrono::milliseconds(sGraceMs)) {
+                return false;
+            }
+            if (PopLocked(sTrickle, out)) {
+                return true;
+            }
         }
-        out = sTrickle.back();
-        sTrickle.pop_back();
-        return true;
+        return allowBackground && PopLocked(sBackground, out);
     }
-    auto& queue = !sTrickle.empty() ? sTrickle : sPending;
-    if (queue.empty()) {
-        return false;
-    }
-    out = queue.back();
-    queue.pop_back();
-    return true;
+    return PopLocked(sTrickle, out) || PopLocked(sPending, out) || (allowBackground && PopLocked(sBackground, out));
 }
 
 void RequestGlobal() {
@@ -193,6 +315,7 @@ bool TakePending(std::vector<std::pair<uint64_t, uint64_t>>& out, std::string& l
     }
     out.swap(sPending);
     sPending.clear();
+    sHanded.insert(out.begin(), out.end());
     label.clear();
     for (const auto& l : sPendingLabels) {
         label += label.empty() ? l : "+" + l;
