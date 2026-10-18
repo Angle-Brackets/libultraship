@@ -37,6 +37,11 @@
 #include "fast/ShaderPrewarm.h"
 #include "fast/lus_gbi.h"
 
+// Keep the batch when a texture lookup returns the one already bound in that slot; switchable for A/B runs.
+extern "C" {
+int gLusSkipSameBind = 1;
+}
+
 #ifdef __SWITCH__
 // Read by the port's hitch monitor: render-thread time in ImportTexture/ImportTextureMask
 // (cache lookups, decode and upload), including calls that hit the texture cache.
@@ -1218,7 +1223,7 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     TextureCacheNode** n = &mRenderingState.mTextures[i];
 
     if (it != mTextureCache.map.end()) {
-        if (mRenderingState.mBoundTexIds[i] != it->second.texture_id) {
+        if (mRenderingState.mBoundTexIds[i] != it->second.texture_id || !gLusSkipSameBind) {
             LUS_FLUSH_WHY(kWhyTex);
             Flush();
             mRenderingState.mBoundTexIds[i] = it->second.texture_id;

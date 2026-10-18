@@ -58,6 +58,14 @@ uint64_t gLusUniformMicros = 0;
 uint64_t gLusVboMicros = 0;
 uint64_t gLusVboMaxMicros = 0; // longest single upload; the reader resets it
 }
+#endif
+
+// Draw-overhead cuts, switchable at runtime for A/B runs (Switch render A/B benchmark). 1 = on.
+extern "C" {
+int gLusStreamVbo = 1;
+int gLusUniformCache = 1;
+}
+#ifdef __SWITCH__
 
 #ifndef GL_COMPLETION_STATUS_KHR
 #define GL_COMPLETION_STATUS_KHR 0x91B1
@@ -130,7 +138,7 @@ void GfxRenderingAPIOGL::SetPerDrawUniforms() {
             mUniformGen[i]++;
             *dirty[i] = false;
         }
-        upload[i] = prg->uniformGen[i] != mUniformGen[i];
+        upload[i] = prg->uniformGen[i] != mUniformGen[i] || !gLusUniformCache;
         prg->uniformGen[i] = mUniformGen[i];
     }
 
@@ -222,7 +230,7 @@ void GfxRenderingAPIOGL::SetPerDrawUniforms() {
             memcpy(prg->lastTexParams, params, sizeof(params));
         }
     }
-    prg->scalarsValid = true;
+    prg->scalarsValid = gLusUniformCache != 0;
 }
 
 void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
@@ -1281,24 +1289,32 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
     const size_t stride = mCurrentShaderProgram->numFloats * sizeof(float);
     const size_t bytes = sizeof(float) * buf_vbo_len;
     size_t first = mVboOffset == SIZE_MAX ? SIZE_MAX : (mVboOffset + stride - 1) / stride;
-    if (first == SIZE_MAX || first * stride + bytes > kVboStreamBytes) {
+    if (!gLusStreamVbo) {
+        // Off: the old per-draw reallocation.
+        glBufferData(GL_ARRAY_BUFFER, bytes, buf_vbo, GL_STREAM_DRAW);
+        mVboOffset = SIZE_MAX;
+        first = 0;
+    } else if (first == SIZE_MAX || first * stride + bytes > kVboStreamBytes) {
         // Full: orphan it. Ranges written since were never drawn from, so the driver needn't wait on the GPU.
         glBufferData(GL_ARRAY_BUFFER, std::max(kVboStreamBytes, bytes), nullptr, GL_STREAM_DRAW);
         first = 0;
     }
     // Unsynchronized: this range hasn't been drawn from since the orphan, so the driver must not wait for
     // the GPU to finish with the buffer (glBufferSubData on a busy buffer may).
-    void* dst = glMapBufferRange != nullptr
+    void* dst = !gLusStreamVbo ? nullptr
+                : glMapBufferRange != nullptr
                     ? glMapBufferRange(GL_ARRAY_BUFFER, first * stride, bytes,
                                        GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT)
                     : nullptr;
     if (dst != nullptr) {
         memcpy(dst, buf_vbo, bytes);
         glUnmapBuffer(GL_ARRAY_BUFFER);
-    } else {
+    } else if (gLusStreamVbo) {
         glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
     }
-    mVboOffset = first * stride + bytes;
+    if (gLusStreamVbo) {
+        mVboOffset = first * stride + bytes;
+    }
     const GLint firstVertex = (GLint) first;
 #ifdef __SWITCH__
     {
