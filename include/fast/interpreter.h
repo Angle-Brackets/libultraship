@@ -849,7 +849,7 @@ class Interpreter {
     float mInterpolationFrac{};
     // N64 RGB framebuffer dither (G_CD_*), applied per-draw in the fragment shader.
     // Cached once per frame from the gEnhancements.Graphics.DitherNoise CVar.
-    bool mRgbDitherEnabled = true;
+    bool mRgbDitherEnabled = false;
 
     // Debug visualization of HD replacement state, tinting each draw in the fragment
     // shader (gEnhancements.Graphics.TextureReplacementDebug). State per draw:

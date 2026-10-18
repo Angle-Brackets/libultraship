@@ -11,9 +11,12 @@
         return vec4(mix(higher, lower, cutoff), linearRGB.a);
     }
 
-    vec4 filter3point(in sampler2D tex, in vec2 texCoord, in vec2 texSize) {
+    // on = 0 zeroes the offset, so all three taps are texture(texCoord) and the result is exactly
+    // the plain sample: one code path instead of a runtime branch.
+    vec4 filter3point(in sampler2D tex, in vec2 texCoord, in vec2 texSize, in float on) {
         vec2 offset = fract(texCoord*texSize - vec2(0.5));
         offset -= step(1.0, offset.x + offset.y);
+        offset *= on;
         vec4 c0 = TEX_OFFSET(offset);
         vec4 c1 = TEX_OFFSET(vec2(offset.x - sign(offset.x), offset.y));
         vec4 c2 = TEX_OFFSET(vec2(offset.x, offset.y - sign(offset.y)));
@@ -22,9 +25,8 @@
 
     vec4 hookTexture2D(in int id, sampler2D tex, in vec2 uv, in vec2 texSize) {
     @if(o_three_point_filtering)
-        if(texture_filtering[id] == @{FILTER_THREE_POINT}) {
-            return filter3point(tex, uv, texSize);
-        }
-    @end
+        return filter3point(tex, uv, texSize, float(texture_filtering[id] == @{FILTER_THREE_POINT}));
+    @else
         return @{texture}(tex, uv);
+    @end
     }

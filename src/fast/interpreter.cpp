@@ -8006,8 +8006,13 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
 
     // Cache the RGB-dither toggle once per frame; the per-draw uniform block reads
     // mRgbDitherEnabled (hot path, so no CVar lookup there).
-    mRgbDitherEnabled = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(
-                            "gEnhancements.Graphics.DitherNoise", 0) != 0;
+    const bool rgbDither = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(
+                               "gEnhancements.Graphics.DitherNoise", 0) != 0;
+    if (rgbDither != mRgbDitherEnabled) {
+        // The dither code is only compiled into the shaders while it's enabled (o_rgb_dither).
+        mRgbDitherEnabled = rgbDither;
+        gfx_shader_cache_clear();
+    }
 
     // Start queued prefetches, then trim decoded HD textures to budget before drawing.
     mHdFrame++;
@@ -8475,6 +8480,9 @@ extern "C" void gfx_clear_post_passes() {
 
 extern "C" void gfx_shader_cache_clear() {
     auto instance = Fast::mInstance.lock().get();
+    if (instance == nullptr) {
+        return;
+    }
     instance->Flush();
     instance->mColorCombinerPool.clear();
     instance->mPrevCombiner = Fast::mInstance.lock().get()->mColorCombinerPool.end();

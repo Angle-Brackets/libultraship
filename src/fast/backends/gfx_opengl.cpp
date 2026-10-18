@@ -54,8 +54,10 @@ std::atomic<uint32_t> gLusShaderAsyncSkippedDraws { 0 }; // triangles skipped wh
 namespace {
 // GL_KHR_parallel_shader_compile probe: the first few compiles are timed call by call to see
 // whether the compile/link calls return early (real background compile) or block.
-constexpr uint32_t kShaderTimingProbeCount = 12;
+// Every compile is logged (they're rare, ~70 ms each): per-stage times, source sizes, running totals.
+constexpr uint32_t kShaderTimingProbeCount = 0xFFFFFFFFu;
 uint32_t sShaderTimingProbed = 0;
+double sProbeVsMs = 0, sProbeFsMs = 0, sProbeLinkMs = 0;
 
 double MillisSince(std::chrono::steady_clock::time_point& t) {
     const auto now = std::chrono::steady_clock::now();
@@ -416,6 +418,10 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
         { "SHADER_COMBINED", SHADER_COMBINED },
         { "SHADER_NOISE", SHADER_NOISE },
         { "o_three_point_filtering", mCurrentFilterMode == FILTER_THREE_POINT },
+        { "o_bilinear_filtering", mCurrentFilterMode == FILTER_LINEAR },
+        // Off by default; the interpreter clears the shader cache when it's toggled.
+        { "o_rgb_dither", Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(
+                              "gEnhancements.Graphics.DitherNoise", 0) != 0 },
         { "append_formula", (InvokeFunc)append_formula },
 #ifdef __APPLE__
         { "GLSL_VERSION", "#version 410 core" },
@@ -645,10 +651,19 @@ static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string
     linkStatus = MillisSince(t);
     if (probe) {
         sShaderTimingProbed++;
-        SPDLOG_INFO("[switch] shader probe #{}: vs compile {:.1f} / status {:.1f} | fs compile {:.1f} / status {:.1f} | "
-                    "link {:.1f} / completion query {:.1f} (ready={}) / status {:.1f} ms",
-                    sShaderTimingProbed, vsCall, vsStatus, fsCall, fsStatus, linkCall, linkReady,
-                    ready ? "yes" : "no", linkStatus);
+        // MillisSince(t) is cumulative, so each stage is the difference from the previous one.
+        const double vsMs = vsStatus, fsMs = fsStatus - vsStatus, linkMs = linkStatus - fsStatus;
+        sProbeVsMs += vsMs;
+        sProbeFsMs += fsMs;
+        sProbeLinkMs += linkMs;
+        SPDLOG_INFO("[switch] shprobe #{} {:#x}/{:#x}: vs {:.1f} ms ({} B) | fs {:.1f} ms ({} B) | link {:.1f} ms "
+                    "(ready={}) | totals vs {:.0f} fs {:.0f} link {:.0f} ms",
+                    sShaderTimingProbed, shader_id0, shader_id1, vsMs, vs_buf.size(), fsMs, fs_buf.size(), linkMs,
+                    ready ? "yes" : "no", sProbeVsMs, sProbeFsMs, sProbeLinkMs);
+        (void) vsCall;
+        (void) fsCall;
+        (void) linkCall;
+        (void) linkReady;
     }
 #endif
     if (!success) {
@@ -1676,7 +1691,12 @@ GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, flo
 
 void GfxRenderingAPIOGL::SetTextureFilter(FilteringMode mode) {
     gfx_texture_cache_clear();
+    const bool changed = mode != mCurrentFilterMode;
     mCurrentFilterMode = mode;
+    if (changed) {
+        // The filter mode is compiled into the fragment shaders (o_*_filtering).
+        gfx_shader_cache_clear();
+    }
 }
 
 FilteringMode GfxRenderingAPIOGL::GetTextureFilter() {

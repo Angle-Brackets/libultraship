@@ -11,16 +11,22 @@
         }
 
         // Filtering must happen after the palette lookup, like real hardware:
-        // params.y selects nearest (0), bilinear (1) or N64 three-point (2).
+        // params.y selects nearest (0), bilinear (1) or N64 three-point (2). Only the modes the
+        // global filter setting can produce are compiled in (three-point: 0/2, bilinear: 0/1).
         vec4 paletteSample(in sampler2D tex, in vec2 uv, in vec2 texSize, in vec4 params) {
-            if (params.y > 1.5) {
-                vec2 offset = fract(uv * texSize - vec2(0.5));
-                offset -= step(1.0, offset.x + offset.y);
-                vec4 c0 = paletteTap(tex, uv - offset / texSize, params.x);
-                vec4 c1 = paletteTap(tex, uv - vec2(offset.x - sign(offset.x), offset.y) / texSize, params.x);
-                vec4 c2 = paletteTap(tex, uv - vec2(offset.x, offset.y - sign(offset.y)) / texSize, params.x);
-                return c0 + abs(offset.x) * (c1 - c0) + abs(offset.y) * (c2 - c0);
-            } else if (params.y > 0.5) {
+        @if(o_three_point_filtering)
+            // Branchless: a zero offset makes all three taps the nearest texel, so mode 0 gives
+            // exactly paletteTap(uv) without a second code path.
+            vec2 offset = fract(uv * texSize - vec2(0.5));
+            offset -= step(1.0, offset.x + offset.y);
+            offset *= step(1.5, params.y);
+            vec4 c0 = paletteTap(tex, uv - offset / texSize, params.x);
+            vec4 c1 = paletteTap(tex, uv - vec2(offset.x - sign(offset.x), offset.y) / texSize, params.x);
+            vec4 c2 = paletteTap(tex, uv - vec2(offset.x, offset.y - sign(offset.y)) / texSize, params.x);
+            return c0 + abs(offset.x) * (c1 - c0) + abs(offset.y) * (c2 - c0);
+        @else
+        @if(o_bilinear_filtering)
+            if (params.y > 0.5) {
                 vec2 t = uv * texSize - 0.5;
                 vec2 f = fract(t);
                 vec2 base = (floor(t) + 0.5) / texSize;
@@ -31,8 +37,9 @@
                 vec4 c01 = paletteTap(tex, base + py, params.x);
                 vec4 c11 = paletteTap(tex, base + px + py, params.x);
                 return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-            } else {
-                return paletteTap(tex, uv, params.x);
             }
+        @end
+            return paletteTap(tex, uv, params.x);
+        @end
         }
     @end

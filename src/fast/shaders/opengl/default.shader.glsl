@@ -84,6 +84,7 @@
 
     @include("shaders/opengl/include/palette.glsli")
 
+    @if(o_rgb_dither)
     // N64 RDP ordered-dither matrices (values 0..7); see applyRdpDither.
     const int kDitherMagic[16] = int[16](0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0);
     const int kDitherBayer[16] = int[16](0, 4, 1, 5, 6, 2, 7, 3, 1, 5, 0, 4, 7, 3, 6, 2);
@@ -120,6 +121,7 @@
         vec3 q = min(floor(clamp(color * 255.0 + d, 0.0, 255.0) / 8.0), 31.0);
         return (q * 8.0 + floor(q / 4.0)) / 255.0;
     }
+    @end
 
     #define TEX_SIZE(tex) vec2(texture_width[tex], texture_height[tex])
 
@@ -304,11 +306,14 @@
             texel.rgb = mix(texel.rgb, new_texel, uGrayscaleColor.a);
         @end
 
-        // N64 RGB framebuffer dither (per-primitive G_CD_* mode in uLodParams.w)
+        // N64 RGB framebuffer dither (per-primitive G_CD_* mode in uLodParams.w). Compiled in only
+        // while enabled: it's a 4-way branch + hash that otherwise always returns early.
+        @if(o_rgb_dither)
         @if(o_alpha)
             texel.rgb = applyRdpDither(texel.rgb, uLodParams.w, gl_FragCoord.xy, noise_scale, frame_count);
         @else
             texel = applyRdpDither(texel, uLodParams.w, gl_FragCoord.xy, noise_scale, frame_count);
+        @end
         @end
 
         // HD-replacement debug tint (no-op when uDebugTint.a == 0)
