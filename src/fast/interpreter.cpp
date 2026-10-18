@@ -19,6 +19,7 @@
 #include <list>
 #include <stack>
 #include <chrono>
+#include <limits>
 #include <thread>
 #include <array>
 #include <algorithm>
@@ -7937,15 +7938,16 @@ void Interpreter::RunGuiOnly() {
     }
 }
 
-void Interpreter::PrewarmShaders() {
-    std::vector<std::pair<uint64_t, uint64_t>> ids;
-    std::string label;
-    if (!ShaderPrewarm::TakePending(ids, label)) {
-        return;
-    }
+size_t Interpreter::PrewarmSome(const std::vector<std::pair<uint64_t, uint64_t>>& ids, size_t& cursor,
+                                double budgetMs) {
     const auto start = std::chrono::steady_clock::now();
     size_t compiled = 0;
-    for (const auto& [id0, id1] : ids) {
+    while (cursor < ids.size()) {
+        if (compiled > 0 &&
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() >= budgetMs) {
+            break;
+        }
+        const auto [id0, id1] = ids[cursor++];
         if (mRapi->LookupShader(id0, id1) != nullptr) {
             continue;
         }
@@ -7957,6 +7959,18 @@ void Interpreter::PrewarmShaders() {
         mRenderingState.mShaderProgram = nullptr;
         compiled++;
     }
+    return compiled;
+}
+
+void Interpreter::PrewarmShaders() {
+    std::vector<std::pair<uint64_t, uint64_t>> ids;
+    std::string label;
+    if (!ShaderPrewarm::TakePending(ids, label)) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    size_t cursor = 0;
+    const size_t compiled = PrewarmSome(ids, cursor, std::numeric_limits<double>::infinity());
     SPDLOG_INFO("[shaders] prewarm {}: compiled {} of {} listed in {} ms", label, compiled, ids.size(),
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
                     .count());

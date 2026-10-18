@@ -892,6 +892,11 @@ class Interpreter {
     void HdEvictToBudget();
     // Compiles queued ShaderPrewarm shaders that aren't built yet (start of a frame, render thread).
     void PrewarmShaders();
+
+    // Compiles ids[cursor..] until budgetMs has been spent (at least one compile), skipping ones
+    // already built; advances cursor. Returns how many were compiled. Render thread only.
+    size_t PrewarmSome(const std::vector<std::pair<uint64_t, uint64_t>>& ids, size_t& cursor, double budgetMs);
+
     size_t HdBudgetBytes() const;
     // Port-supplied: the group prefix to prefetch when a replacement is first requested
     std::function<std::string(const std::string&)> mReplacementGroupOf;
