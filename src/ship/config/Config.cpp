@@ -231,6 +231,11 @@ void Config::Save() {
             return;
         }
     }
+#ifdef __SWITCH__
+    // fsdev's rename fails with EEXIST instead of replacing the target.
+    std::error_code removeTargetEc;
+    fs::remove(configPath, removeTargetEc);
+#endif
     fs::rename(tempPath, configPath, ec);
     if (ec) {
         SPDLOG_ERROR("Could not replace config \"{}\": {}", mPath, ec.message());
