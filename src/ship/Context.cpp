@@ -217,6 +217,12 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
         mLogger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
         GetLogger()->set_level(debugBuildLogLevel);
         GetLogger()->flush_on(spdlog::level::trace);
+#elif defined(__SWITCH__)
+        // Synchronous and flushed per line: an async queue dies with the process on a crash,
+        // taking the last (most useful) lines with it before they reach nxlink or the file.
+        mLogger = std::make_shared<spdlog::logger>(GetName(), sinks.begin(), sinks.end());
+        GetLogger()->set_level(releaseBuildLogLevel);
+        GetLogger()->flush_on(spdlog::level::trace);
 #else
         mLogThreadPool = std::make_shared<spdlog::details::thread_pool>(8192, 1);
         mLogger = std::make_shared<spdlog::async_logger>(GetName(), sinks.begin(), sinks.end(), mLogThreadPool,
