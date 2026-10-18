@@ -4,6 +4,7 @@
 #endif
 #include <spdlog/spdlog.h>
 #include "ship/resource/File.h"
+#include "ship/Context.h"
 #include "ship/resource/archive/Archive.h"
 #include <algorithm>
 #include <chrono>
@@ -63,7 +64,14 @@ void ResourceManager::Init(const std::vector<std::string>& archivePaths,
 #ifdef __SWITCH__
     // The formula below gives one worker here, and std::threads start on core 0, where the render thread
     // waits on them for every first-time texture. Two workers on core 2 (audio's; the game is on core 1).
-    mThreadPool = std::make_shared<BS::thread_pool>(2, [] { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2); });
+    // gSwitch.Tweaks.ThreadPinning (the port's Switch menu) can leave them on the default core.
+    auto cvars = Context::GetRawInstance() != nullptr ? Context::GetRawInstance()->GetConsoleVariables() : nullptr;
+    const bool pin = cvars == nullptr || cvars->GetInteger("gSwitch.Tweaks.ThreadPinning", 1) != 0;
+    mThreadPool = std::make_shared<BS::thread_pool>(2, [pin] {
+        if (pin) {
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2);
+        }
+    });
 #else
     // the extra `- 1` is because we reserve an extra thread for spdlog
     size_t threadCount = std::max(1, (int32_t)(std::thread::hardware_concurrency() - reservedThreadCount - 1));
