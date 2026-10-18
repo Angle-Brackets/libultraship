@@ -62,7 +62,7 @@ uint64_t gLusVboMaxMicros = 0; // longest single upload; the reader resets it
 
 // Draw-overhead cuts, switchable at runtime for A/B runs (Switch render A/B benchmark). 1 = on.
 extern "C" {
-int gLusStreamVbo = 0; // off until the fenced ring is proven on hardware
+int gLusStreamVbo = 1;
 int gLusUniformCache = 1;
 }
 #ifdef __SWITCH__
