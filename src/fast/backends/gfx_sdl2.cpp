@@ -49,6 +49,7 @@
 
 #ifdef __SWITCH__
 #include <switch.h>
+#include <glad/glad.h>
 #endif
 
 #include "ship/window/gui/Gui.h"
@@ -511,6 +512,13 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
         mCtx = SDL_GL_CreateContext(mWnd);
 
         SDL_GL_MakeCurrent(mWnd, mCtx);
+#ifdef __SWITCH__
+        // ImGui's GL3 backend is brought up from Gui::Init, before the rendering API's
+        // Init, and calls through glad's pointers; load them as soon as a context exists.
+        if (!gladLoadGL()) {
+            SPDLOG_ERROR("gladLoadGL failed");
+        }
+#endif
         SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
 
         window_impl.Opengl = { mWnd, mCtx };
