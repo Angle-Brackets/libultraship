@@ -5,6 +5,33 @@
 #include "spdlog/spdlog.h"
 #include <unordered_map>
 
+#ifdef __SWITCH__
+#include <atomic>
+#include <chrono>
+// Read by the port's hitch monitor to attribute frame stalls to archive I/O.
+extern "C" {
+std::atomic<uint32_t> gLusArchiveLoadCount { 0 };
+std::atomic<uint64_t> gLusArchiveLoadMicros { 0 };
+std::atomic<uint64_t> gLusArchiveLoadBytes { 0 };
+std::atomic<uint32_t> gLusArchiveOpenCount { 0 };
+std::atomic<uint64_t> gLusArchiveOpenMicros { 0 };
+}
+
+namespace {
+uint64_t MicrosSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+}
+
+struct ArchiveLoadTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~ArchiveLoadTimer() {
+        gLusArchiveLoadCount++;
+        gLusArchiveLoadMicros += MicrosSince(start);
+    }
+};
+} // namespace
+#endif
+
 namespace Ship {
 O2rArchive::O2rArchive(const std::string& archivePath) : Archive(archivePath) {
     mZipArchive = nullptr;
@@ -22,7 +49,16 @@ zip_t* O2rArchive::GetZipHandle() {
         mZipArchivePool.pop_back();
         return handle;
     }
+#ifdef __SWITCH__
+    // A fresh handle re-reads the whole central directory (60k entries for pm64.o2r).
+    const auto openStart = std::chrono::steady_clock::now();
+    zip_t* opened = zip_open(GetPath().c_str(), ZIP_RDONLY, nullptr);
+    gLusArchiveOpenCount++;
+    gLusArchiveOpenMicros += MicrosSince(openStart);
+    return opened;
+#else
     return zip_open(GetPath().c_str(), ZIP_RDONLY, nullptr);
+#endif
 }
 
 void O2rArchive::ReleaseZipHandle(zip_t* handle) {
@@ -41,6 +77,9 @@ std::shared_ptr<File> O2rArchive::LoadFile(uint64_t hash) {
 }
 
 std::shared_ptr<File> O2rArchive::LoadFile(const std::string& filePath) {
+#ifdef __SWITCH__
+    ArchiveLoadTimer loadTimer;
+#endif
     zip_t* zipArchive = GetZipHandle();
     if (zipArchive == nullptr) {
         SPDLOG_TRACE("Failed to open file {} from zip archive {}. Archive not open.", filePath, GetPath());
@@ -78,6 +117,9 @@ std::shared_ptr<File> O2rArchive::LoadFile(const std::string& filePath) {
 
     auto fileToLoad = std::make_shared<File>();
     fileToLoad->Buffer = std::make_shared<std::vector<char>>(zipEntryStat.size);
+#ifdef __SWITCH__
+    gLusArchiveLoadBytes += zipEntryStat.size;
+#endif
 
     if (zip_fread(zipEntryFile, fileToLoad->Buffer->data(), zipEntryStat.size) < 0) {
         SPDLOG_TRACE("Error reading file {} in zip archive  {}.", filePath, GetPath());
