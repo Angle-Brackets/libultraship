@@ -437,6 +437,9 @@ struct RenderingState {
     struct XYWidthHeight viewport, scissor;
     struct ShaderProgram* mShaderProgram;
     TextureCacheNode* mTextures[SHADER_MAX_TEXTURES];
+    // Texture id last selected through the cache in each slot, so a lookup that returns it again
+    // doesn't end the batch. 0 = unknown (a framebuffer or other binding since): flush to be safe.
+    uint32_t mBoundTexIds[SHADER_MAX_TEXTURES];
 };
 
 struct FBInfo {

@@ -94,6 +94,9 @@ GfxClipParameters GfxRenderingAPIOGL::GetClipParameters() {
     return { false, mFrameBuffers[mCurrentFrameBuffer].invertY };
 }
 
+// Vertex stream buffer size: several frames of the heaviest scenes between reallocations.
+constexpr size_t kVboStreamBytes = 4 * 1024 * 1024;
+
 static void VertexArraySetAttribs(ShaderProgram* prg) {
     size_t numFloats = prg->numFloats;
     size_t pos = 0;
@@ -114,85 +117,111 @@ void GfxRenderingAPIOGL::SetUniforms(ShaderProgram* prg) const {
 }
 
 void GfxRenderingAPIOGL::SetPerDrawUniforms() {
-    glUniform1f(mCurrentShaderProgram->prim_depth_location, mCurrentPrimDepth);
-    glUniform1f(mCurrentShaderProgram->lod_max_location, mCurrentMaxLod);
+    ShaderProgram* prg = mCurrentShaderProgram;
 
-    // Combiner constants (uniform state is per-program in GL, so upload each draw)
-    if (mCurrentShaderProgram->combiner_inputs_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->combiner_inputs_location, mCurrentShaderProgram->numInputs,
-                     &mCombinerUniforms.inputs[0][0]);
+    // The setters raise the dirty flags only on a real change; GL turns them into generations, since
+    // uniform state is per program and each program catches up only when it next draws.
+    bool* dirty[4] = { &mCombinerUniformsDirty, &mCustomUniformsDirty, &mTransformUniformsDirty,
+                       &mLightingUniformsDirty };
+    bool upload[4];
+    for (int i = 0; i < 4; i++) {
+        if (*dirty[i]) {
+            mUniformGen[i]++;
+            *dirty[i] = false;
+        }
+        upload[i] = prg->uniformGen[i] != mUniformGen[i];
+        prg->uniformGen[i] = mUniformGen[i];
     }
-    if (mCurrentShaderProgram->fog_color_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->fog_color_location, 1, mCombinerUniforms.fog_color);
+
+    if (!prg->scalarsValid || prg->lastPrimDepth != mCurrentPrimDepth) {
+        glUniform1f(prg->prim_depth_location, mCurrentPrimDepth);
+        prg->lastPrimDepth = mCurrentPrimDepth;
     }
-    if (mCurrentShaderProgram->grayscale_color_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->grayscale_color_location, 1, mCombinerUniforms.grayscale_color);
+    if (!prg->scalarsValid || prg->lastMaxLod != mCurrentMaxLod) {
+        glUniform1f(prg->lod_max_location, mCurrentMaxLod);
+        prg->lastMaxLod = mCurrentMaxLod;
     }
-    if (mCurrentShaderProgram->uv_transform_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->uv_transform_location, 2, &mCombinerUniforms.uv_transform[0][0]);
+
+    // Combiner constants
+    if (upload[0]) {
+        if (prg->combiner_inputs_location >= 0) {
+            glUniform4fv(prg->combiner_inputs_location, prg->numInputs, &mCombinerUniforms.inputs[0][0]);
+        }
+        if (prg->fog_color_location >= 0) {
+            glUniform4fv(prg->fog_color_location, 1, mCombinerUniforms.fog_color);
+        }
+        if (prg->grayscale_color_location >= 0) {
+            glUniform4fv(prg->grayscale_color_location, 1, mCombinerUniforms.grayscale_color);
+        }
+        if (prg->uv_transform_location >= 0) {
+            glUniform4fv(prg->uv_transform_location, 2, &mCombinerUniforms.uv_transform[0][0]);
+        }
+        if (prg->tex_clamp_location >= 0) {
+            glUniform4fv(prg->tex_clamp_location, 2, &mCombinerUniforms.texture_clamp[0][0]);
+        }
+        if (prg->fog_params_location >= 0) {
+            glUniform4fv(prg->fog_params_location, 1, mCombinerUniforms.fog_params);
+        }
+        if (prg->palette_params_location >= 0) {
+            glUniform4fv(prg->palette_params_location, 2, &mCombinerUniforms.palette_params[0][0]);
+        }
+        if (prg->lod_params_location >= 0) {
+            glUniform4fv(prg->lod_params_location, 1, mCombinerUniforms.lod_params);
+        }
+        if (prg->debug_tint_location >= 0) {
+            glUniform4fv(prg->debug_tint_location, 1, mCombinerUniforms.debug_tint);
+        }
     }
-    if (mCurrentShaderProgram->tex_clamp_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->tex_clamp_location, 2, &mCombinerUniforms.texture_clamp[0][0]);
-    }
-    if (mCurrentShaderProgram->fog_params_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->fog_params_location, 1, mCombinerUniforms.fog_params);
-    }
-    if (mCurrentShaderProgram->palette_params_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->palette_params_location, 2, &mCombinerUniforms.palette_params[0][0]);
-    }
-    if (mCurrentShaderProgram->lod_params_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->lod_params_location, 1, mCombinerUniforms.lod_params);
-    }
-    if (mCurrentShaderProgram->debug_tint_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->debug_tint_location, 1, mCombinerUniforms.debug_tint);
-    }
-    if (mCurrentShaderProgram->custom_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->custom_location, GFX_NUM_CUSTOM_UNIFORMS, &mCustomUniforms.regs[0][0]);
+    if (upload[1] && prg->custom_location >= 0) {
+        glUniform4fv(prg->custom_location, GFX_NUM_CUSTOM_UNIFORMS, &mCustomUniforms.regs[0][0]);
     }
 
     // Vertex transform: matrix palette + y flip
-    if (mCurrentShaderProgram->mtx_palette_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->mtx_palette_location, GFX_MTX_PALETTE_SIZE * 4,
-                     &mTransformUniforms.mtx_palette[0][0][0]);
-        glUniform4fv(mCurrentShaderProgram->y_scale_location, 1, mTransformUniforms.y_scale);
-    }
-    if (mCurrentShaderProgram->mv_cols_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->mv_cols_location, 3, &mLightingUniforms.mv_cols[0][0]);
+    if (upload[2] && prg->mtx_palette_location >= 0) {
+        glUniform4fv(prg->mtx_palette_location, GFX_MTX_PALETTE_SIZE * 4, &mTransformUniforms.mtx_palette[0][0][0]);
+        glUniform4fv(prg->y_scale_location, 1, mTransformUniforms.y_scale);
     }
 
     // Lighting/texgen uniforms (vertex shader)
-    if (mCurrentShaderProgram->lights_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->ambient_location, 1, mLightingUniforms.ambient);
-        glUniform1i(mCurrentShaderProgram->num_lights_location, mLightingUniforms.num_lights);
-        if (mLightingUniforms.num_lights > 0) {
-            glUniform4fv(mCurrentShaderProgram->lights_location, mLightingUniforms.num_lights * 3,
-                         &mLightingUniforms.lights[0][0][0]);
+    if (upload[3]) {
+        if (prg->mv_cols_location >= 0) {
+            glUniform4fv(prg->mv_cols_location, 3, &mLightingUniforms.mv_cols[0][0]);
         }
-        if (mCurrentShaderProgram->mv_rows_location >= 0) {
-            glUniform4fv(mCurrentShaderProgram->mv_rows_location, 3, &mLightingUniforms.mv_rows[0][0]);
+        if (prg->lights_location >= 0) {
+            glUniform4fv(prg->ambient_location, 1, mLightingUniforms.ambient);
+            glUniform1i(prg->num_lights_location, mLightingUniforms.num_lights);
+            if (mLightingUniforms.num_lights > 0) {
+                glUniform4fv(prg->lights_location, mLightingUniforms.num_lights * 3,
+                             &mLightingUniforms.lights[0][0][0]);
+            }
+            if (prg->mv_rows_location >= 0) {
+                glUniform4fv(prg->mv_rows_location, 3, &mLightingUniforms.mv_rows[0][0]);
+            }
         }
-    }
-    if (mCurrentShaderProgram->lookat_x_location >= 0) {
-        glUniform4fv(mCurrentShaderProgram->lookat_x_location, 1, mLightingUniforms.lookat_x);
-        glUniform4fv(mCurrentShaderProgram->lookat_y_location, 1, mLightingUniforms.lookat_y);
-        if (mCurrentShaderProgram->texgen0_location >= 0) {
-            glUniform4fv(mCurrentShaderProgram->texgen0_location, 1, mLightingUniforms.texgen[0]);
-        }
-        if (mCurrentShaderProgram->texgen1_location >= 0) {
-            glUniform4fv(mCurrentShaderProgram->texgen1_location, 1, mLightingUniforms.texgen[1]);
+        if (prg->lookat_x_location >= 0) {
+            glUniform4fv(prg->lookat_x_location, 1, mLightingUniforms.lookat_x);
+            glUniform4fv(prg->lookat_y_location, 1, mLightingUniforms.lookat_y);
+            if (prg->texgen0_location >= 0) {
+                glUniform4fv(prg->texgen0_location, 1, mLightingUniforms.texgen[0]);
+            }
+            if (prg->texgen1_location >= 0) {
+                glUniform4fv(prg->texgen1_location, 1, mLightingUniforms.texgen[1]);
+            }
         }
     }
 
-    if (mCurrentShaderProgram->usedTextures[0] || mCurrentShaderProgram->usedTextures[1]) {
-        GLint filtering[2] = { textures[mCurrentTextureIds[0]].filtering, textures[mCurrentTextureIds[1]].filtering };
-        glUniform1iv(mCurrentShaderProgram->texture_filtering_location, 2, filtering);
-
-        GLint width[2] = { textures[mCurrentTextureIds[0]].width, textures[mCurrentTextureIds[1]].width };
-        glUniform1iv(mCurrentShaderProgram->texture_width_location, 2, width);
-
-        GLint height[2] = { textures[mCurrentTextureIds[0]].height, textures[mCurrentTextureIds[1]].height };
-        glUniform1iv(mCurrentShaderProgram->texture_height_location, 2, height);
+    if (prg->usedTextures[0] || prg->usedTextures[1]) {
+        const TextureInfo& t0 = textures[mCurrentTextureIds[0]];
+        const TextureInfo& t1 = textures[mCurrentTextureIds[1]];
+        const GLint params[6] = { t0.filtering, t1.filtering, t0.width, t1.width, t0.height, t1.height };
+        if (!prg->scalarsValid || memcmp(params, prg->lastTexParams, sizeof(params)) != 0) {
+            glUniform1iv(prg->texture_filtering_location, 2, &params[0]);
+            glUniform1iv(prg->texture_width_location, 2, &params[2]);
+            glUniform1iv(prg->texture_height_location, 2, &params[4]);
+            memcpy(prg->lastTexParams, params, sizeof(params));
+        }
     }
+    prg->scalarsValid = true;
 }
 
 void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
@@ -1247,7 +1276,18 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 #endif
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
+    // Append to the stream buffer; start on a whole vertex so the attribute pointers (offset 0) still line up.
+    const size_t stride = mCurrentShaderProgram->numFloats * sizeof(float);
+    const size_t bytes = sizeof(float) * buf_vbo_len;
+    size_t first = mVboOffset == SIZE_MAX ? SIZE_MAX : (mVboOffset + stride - 1) / stride;
+    if (first == SIZE_MAX || first * stride + bytes > kVboStreamBytes) {
+        // Full: orphan it. Ranges written since were never drawn from, so the driver needn't wait on the GPU.
+        glBufferData(GL_ARRAY_BUFFER, std::max(kVboStreamBytes, bytes), nullptr, GL_STREAM_DRAW);
+        first = 0;
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
+    mVboOffset = first * stride + bytes;
+    const GLint firstVertex = (GLint) first;
 #ifdef __SWITCH__
     gLusVboMicros +=
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
@@ -1267,7 +1307,7 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
         glPolygonOffset(-mDecalSlopeBias, 2);
         glStencilFunc(GL_ALWAYS, decalBit, decalBit);
         glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-        glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
+        glDrawArrays(GL_TRIANGLES, firstVertex, 3 * buf_vbo_num_tris);
 
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(mLastDepthMask ? GL_TRUE : GL_FALSE);
@@ -1275,13 +1315,13 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
         glPolygonOffset(mDecalSlopeBias, -2);
         glStencilFunc(GL_EQUAL, decalBit, decalBit);
         glStencilOp(GL_KEEP, GL_ZERO, GL_ZERO);
-        glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
+        glDrawArrays(GL_TRIANGLES, firstVertex, 3 * buf_vbo_num_tris);
 
         glStencilMask(0xFF);
         glDisable(GL_STENCIL_TEST);
         return;
     }
-    glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
+    glDrawArrays(GL_TRIANGLES, firstVertex, 3 * buf_vbo_num_tris);
 }
 
 void GfxRenderingAPIOGL::Init() {

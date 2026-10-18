@@ -64,6 +64,14 @@ struct ShaderProgram {
     GLint lod_params_location;
     GLint debug_tint_location;
     GLint custom_location;
+    // GL keeps uniform values per program, so each group is uploaded only when it changed since this
+    // program last drew: the generation of each group (combiner, custom, transform, lighting) it holds,
+    // and the scalar/texture values it was given. Zero (a new program) means never uploaded.
+    uint32_t uniformGen[4] = {};
+    bool scalarsValid = false;
+    float lastPrimDepth = 0.0f;
+    float lastMaxLod = 0.0f;
+    GLint lastTexParams[6] = {};
 };
 
 struct FramebufferOGL {
@@ -169,6 +177,11 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     ShaderProgram* mLastLoadedShader = nullptr;
 
     GLuint mOpenglVbo = 0;
+    // Vertices stream into one buffer at increasing offsets; it is orphaned (reallocated) only when
+    // full, not on every draw. SIZE_MAX: not allocated yet.
+    size_t mVboOffset = SIZE_MAX;
+    // Generation of each uniform group (combiner, custom, transform, lighting), bumped when it changes.
+    uint32_t mUniformGen[4] = { 1, 1, 1, 1 };
 #if defined(__APPLE__) || defined(USE_OPENGLES)
     GLuint mOpenglVao;
 #endif

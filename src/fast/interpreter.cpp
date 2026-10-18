@@ -1215,12 +1215,14 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     TextureCacheNode** n = &mRenderingState.mTextures[i];
 
     if (it != mTextureCache.map.end()) {
-#ifdef __SWITCH__
-        // Slot already holds this cache entry: the import that got here was redundant.
-        if (*n == &*it) {
-            gLusTexSame++;
+        if (mRenderingState.mBoundTexIds[i] != it->second.texture_id) {
+            LUS_FLUSH_WHY(kWhyTex);
+            Flush();
+            mRenderingState.mBoundTexIds[i] = it->second.texture_id;
+        } else {
+            // Already bound in this slot: the batch carries on.
+            LUS_COUNT(gLusTexSame);
         }
-#endif
         mRapi->SelectTexture(i, it->second.texture_id);
         *n = &*it;
         mTextureCache.lru.splice(mTextureCache.lru.end(), mTextureCache.lru,
@@ -1229,6 +1231,9 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     }
 
     LUS_COUNT(gLusTexMiss);
+    // A new texture (and maybe an eviction) changes the binding: end the batch first.
+    LUS_FLUSH_WHY(kWhyTex);
+    Flush();
     if (mTextureCache.map.size() >= mTextureCacheMaxSize) {
         TextureCacheEvictOldest();
     }
@@ -1249,6 +1254,7 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
 
     mRapi->SelectTexture(i, texture_id);
     mRapi->SetSamplerParameters(i, false, 0, 0);
+    mRenderingState.mBoundTexIds[i] = texture_id;
     *n = node;
     return false;
 }
@@ -1595,6 +1601,7 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
                 for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
                     if (mRenderingState.mTextures[j] == &*it)
                         mRenderingState.mTextures[j] = nullptr;
+                        mRenderingState.mBoundTexIds[j] = 0;
                 }
                 mTextureCache.lru.erase(it->second.lru_location);
                 // Defer recycling to the next frame: this delete can happen mid-frame
@@ -1629,6 +1636,7 @@ void Interpreter::TextureCacheDeleteRanges(std::vector<std::pair<const uint8_t*,
         for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
             if (mRenderingState.mTextures[j] == &*it) {
                 mRenderingState.mTextures[j] = nullptr;
+                mRenderingState.mBoundTexIds[j] = 0;
             }
         }
         mTextureCache.lru.erase(it->second.lru_location);
@@ -1649,6 +1657,7 @@ void Interpreter::TextureCacheDrop(int i) {
     mTextureCache.lru.erase(node->second.lru_location);
     mTextureCache.map.erase(node->first);
     mRenderingState.mTextures[i] = nullptr;
+    mRenderingState.mBoundTexIds[i] = 0;
 }
 
 // Invalidate cache entries whose key references the given palette DRAM addr.
@@ -1661,6 +1670,7 @@ void Interpreter::TextureCacheDeleteByPalette(const uint8_t* palAddr) {
             for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
                 if (mRenderingState.mTextures[j] == &*it)
                     mRenderingState.mTextures[j] = nullptr;
+                    mRenderingState.mBoundTexIds[j] = 0;
             }
             mTextureCache.lru.erase(it->second.lru_location);
             mTextureCache.deferred_free_texture_ids.push_back(it->second.texture_id);
@@ -3174,6 +3184,7 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         if (fbIt != mFbTextures.end()) {
             Flush();
             mRapi->SelectTextureFb(fbIt->second, i);
+            mRenderingState.mBoundTexIds[i] = 0;
             mRdp->textures_changed[i] = false;
             return;
         }
@@ -3901,8 +3912,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                 mRdp->textures_changed[i] = true;
             }
             if (mRdp->textures_changed[i]) {
-                LUS_FLUSH_WHY(kWhyTex);
-                Flush();
+                // No Flush here: TextureCacheLookup ends the batch only if the slot's binding changes.
                 // Only the base texture slot carries a mip chain; masks and
                 // replacements are always uploaded as single-level textures.
                 mCurrentMipExtraLevels = (i == 0) ? mipExtraLevels : 0;
@@ -5944,7 +5954,9 @@ int Interpreter::RunPostPasses() {
     // re-import heuristic (mip/indexed comparison) would otherwise fire
     // against the game's last texture and import it over the fb binding.
     mRenderingState.mTextures[0] = nullptr;
+    mRenderingState.mBoundTexIds[0] = 0;
     mRenderingState.mTextures[1] = nullptr;
+    mRenderingState.mBoundTexIds[1] = 0;
     // GfxDpImageRectangle re-imports textures when the active tile differs from
     // its argument; tile 0 must already be current or the flush would import
     // from the game's stale texture_to_load pointer instead of the bound fb.
@@ -5968,6 +5980,7 @@ int Interpreter::RunPostPasses() {
 
         // Previous image on tile 0
         mRapi->SelectTextureFb(cur, 0);
+        mRenderingState.mBoundTexIds[0] = 0;
         mRdp->textures_changed[0] = false;
         mRdp->textures_changed[1] = false;
 
@@ -6005,7 +6018,9 @@ int Interpreter::RunPostPasses() {
     // clear the cached entries so the next draw's forced-reimport heuristic
     // (mip/indexed comparison) doesn't fire against stale state.
     mRenderingState.mTextures[0] = nullptr;
+    mRenderingState.mBoundTexIds[0] = 0;
     mRenderingState.mTextures[1] = nullptr;
+    mRenderingState.mBoundTexIds[1] = 0;
     mRdp->viewport_or_scissor_changed = true;
     mRenderingState.viewport = {};
     mRenderingState.scissor = {};
@@ -6976,6 +6991,7 @@ bool gfx_set_timg_fb_handler_custom(F3DGfx** cmd0) {
 
     gfx->Flush();
     gfx->mRapi->SelectTextureFb((uint32_t)cmd->words.w1, 0);
+    gfx->mRenderingState.mBoundTexIds[0] = 0;
     gfx->mRdp->textures_changed[0] = false;
     gfx->mRdp->textures_changed[1] = false;
     return false;
@@ -8052,6 +8068,8 @@ void Interpreter::PrewarmShaders() {
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements,
                       const std::unordered_map<Gfx*, Gfx*>& dl_replacements) {
     SpReset();
+    // Bindings may have changed between frames (GUI, post-processing).
+    memset(mRenderingState.mBoundTexIds, 0, sizeof(mRenderingState.mBoundTexIds));
 
     // Cache the RGB-dither toggle once per frame; the per-draw uniform block reads
     // mRgbDitherEnabled (hot path, so no CVar lookup there).
