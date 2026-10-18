@@ -112,6 +112,11 @@ class GfxRenderingAPI {
     virtual void ClearShaderCache() = 0;
     virtual ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) = 0;
     virtual ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) = 0;
+    // False while a backend is still compiling this shader off-thread (it is queued on the first
+    // call); the caller skips the draw and asks again. Backends that compile inline are always ready.
+    virtual bool PollShaderReady(uint64_t shaderId0, uint64_t shaderId1) {
+        return true;
+    }
     virtual void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) = 0;
     virtual uint32_t NewTexture() = 0;
     virtual void SelectTexture(int tile, uint32_t textureId) = 0;

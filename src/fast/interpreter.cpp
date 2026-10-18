@@ -320,6 +320,10 @@ void Interpreter::LatchCombinerUniforms() {
 ShaderProgram* Interpreter::LookupOrCreateShaderProgram(uint64_t id0, uint64_t id1) {
     ShaderProgram* prg = mRapi->LookupShader(id0, id1);
     if (prg == nullptr) {
+        if (!mRapi->PollShaderReady(id0, id1)) {
+            // Still compiling off-thread: leave the bound program alone; the caller skips this draw.
+            return nullptr;
+        }
         mRapi->UnloadShader(mRenderingState.mShaderProgram);
         prg = mRapi->CreateAndLoadNewShader(id0, id1);
         mRenderingState.mShaderProgram = prg;
@@ -3994,6 +3998,9 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     if (prg == NULL) {
         comb->prg[tm] = prg =
             LookupOrCreateShaderProgram(comb->shader_id0, comb->shader_id1 | tm * SHADER_OPT(TEXEL0_CLAMP_S));
+        if (prg == NULL) {
+            return; // shader compiling in the background; drop this triangle
+        }
     }
     if (prg != mRenderingState.mShaderProgram) {
         Flush();

@@ -96,6 +96,9 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     void LoadShader(ShaderProgram* newPrg) override;
     ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) override;
     ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) override;
+#ifdef __SWITCH__
+    bool PollShaderReady(uint64_t shaderId0, uint64_t shaderId1) override;
+#endif
     void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) override;
     void ClearShaderCache() override;
     uint32_t NewTexture() override;
@@ -158,6 +161,10 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     int8_t mLastScissorEnabled = -1;
 
     std::map<std::pair<uint64_t, uint64_t>, ShaderProgram> mShaderProgramPool;
+#ifdef __SWITCH__
+    // Programs linked by the background compiler, waiting for CreateAndLoadNewShader to set them up.
+    std::map<std::pair<uint64_t, uint64_t>, GLuint> mReadyPrograms;
+#endif
     ShaderProgram* mCurrentShaderProgram;
     ShaderProgram* mLastLoadedShader = nullptr;
 

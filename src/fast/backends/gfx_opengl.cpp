@@ -29,12 +29,22 @@
 
 #ifdef __SWITCH__
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <switch.h>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
-// Read by the port's hitch monitor to attribute frame stalls to shader compiles.
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
+// Read by the port's hitch monitor. Compile counters are main-thread (blocking) compiles only.
 extern "C" {
 uint32_t gLusShaderCompileCount = 0;
 uint64_t gLusShaderCompileMicros = 0;
+std::atomic<uint32_t> gLusShaderAsyncCompiled { 0 };  // linked on the background thread
+std::atomic<uint32_t> gLusShaderAsyncSkippedDraws { 0 }; // triangles skipped while waiting
 }
 
 #ifndef GL_COMPLETION_STATUS_KHR
@@ -551,8 +561,18 @@ static std::string BuildVsShader(const CCFeatures& cc_features) {
     return result;
 }
 
+#ifdef __SWITCH__
+namespace {
+void ResetAsyncShaders(); // defined with AsyncShaderCompiler below
+}
+#endif
+
 void GfxRenderingAPIOGL::ClearShaderCache() {
     mShaderProgramPool.clear();
+#ifdef __SWITCH__
+    ResetAsyncShaders();
+    mReadyPrograms.clear();
+#endif
 }
 
 static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string& fs_buf, uint64_t shader_id0,
@@ -645,6 +665,178 @@ static GLuint CompileAndLinkProgram(const std::string& vs_buf, const std::string
     return shader_program;
 }
 
+#ifdef __SWITCH__
+namespace {
+// Compiles shader programs on a second, shared, surfaceless EGL context pinned to its own core, so
+// a new combiner costs a few skipped draws instead of a 40-100 ms stall on the render thread.
+class AsyncShaderCompiler {
+  public:
+    // Call on the render thread with the main context current. False leaves compiles inline.
+    bool Start() {
+        mDisplay = eglGetCurrentDisplay();
+        mShareContext = eglGetCurrentContext();
+        EGLint configId = 0;
+        if (mDisplay == EGL_NO_DISPLAY || mShareContext == EGL_NO_CONTEXT ||
+            !eglQueryContext(mDisplay, mShareContext, EGL_CONFIG_ID, &configId)) {
+            SPDLOG_WARN("[switch] async shaders: no current EGL context");
+            return false;
+        }
+        const EGLint configAttribs[] = { EGL_CONFIG_ID, configId, EGL_NONE };
+        EGLint numConfigs = 0;
+        if (!eglChooseConfig(mDisplay, configAttribs, &mConfig, 1, &numConfigs) || numConfigs != 1) {
+            SPDLOG_WARN("[switch] async shaders: config {} not found", configId);
+            return false;
+        }
+        mThread = std::thread([this] { Worker(); });
+        std::unique_lock<std::mutex> lock(mMutex);
+        mCv.wait(lock, [this] { return mStartResult != 0; });
+        if (mStartResult < 0) {
+            mThread.join();
+            return false;
+        }
+        mRunning = true;
+        return true;
+    }
+
+    bool Running() const {
+        return mRunning;
+    }
+
+    // Render thread only. Queues the job the first time; returns true once with the linked program.
+    bool Poll(uint64_t id0, uint64_t id1, const std::string& vs, const std::string& fs, GLuint* program) {
+        const auto key = std::make_pair(id0, id1);
+        auto it = mJobs.find(key);
+        if (it == mJobs.end()) {
+            auto job = std::make_shared<Job>();
+            job->id0 = id0;
+            job->id1 = id1;
+            job->vs = vs;
+            job->fs = fs;
+            mJobs.emplace(key, job);
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+                mQueue.push_back(job);
+            }
+            mCv.notify_one();
+            return false;
+        }
+        if (!it->second->done.load(std::memory_order_acquire)) {
+            return false;
+        }
+        *program = it->second->program;
+        mJobs.erase(it);
+        return true;
+    }
+
+    bool IsQueued(uint64_t id0, uint64_t id1) const {
+        return mJobs.count(std::make_pair(id0, id1)) != 0;
+    }
+
+    // Shader sources changed (shader pack, settings): drop what hasn't been handed out.
+    void Reset() {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mQueue.clear();
+        mJobs.clear();
+    }
+
+  private:
+    struct Job {
+        uint64_t id0 = 0, id1 = 0;
+        std::string vs, fs;
+        GLuint program = 0;
+        std::atomic<bool> done { false };
+    };
+
+    void Worker() {
+        // Core 2: the render thread and the game's std::threads default to core 0.
+        const Result coreRc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2);
+        eglBindAPI(EGL_OPENGL_API);
+        const EGLint ctxAttribs[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, 2, EGL_CONTEXT_MINOR_VERSION_KHR, 1,
+                                      EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
+                                      EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR, EGL_NONE };
+        EGLContext ctx = eglCreateContext(mDisplay, mConfig, mShareContext, ctxAttribs);
+        EGLSurface surface = EGL_NO_SURFACE;
+        bool current = ctx != EGL_NO_CONTEXT && eglMakeCurrent(mDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
+        if (ctx != EGL_NO_CONTEXT && !current) {
+            // No EGL_KHR_surfaceless_context: fall back to a 1x1 pbuffer.
+            const EGLint pbAttribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+            surface = eglCreatePbufferSurface(mDisplay, mConfig, pbAttribs);
+            current = surface != EGL_NO_SURFACE && eglMakeCurrent(mDisplay, surface, surface, ctx);
+        }
+        SPDLOG_WARN("[switch] async shaders: core mask rc={:#x}, context {}, current {} ({}), egl error {:#x}",
+                    coreRc, ctx != EGL_NO_CONTEXT ? "ok" : "FAILED", current ? "yes" : "NO",
+                    surface == EGL_NO_SURFACE ? "surfaceless" : "pbuffer", eglGetError());
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mStartResult = current ? 1 : -1;
+        }
+        mCv.notify_all();
+        if (!current) {
+            if (ctx != EGL_NO_CONTEXT) {
+                eglDestroyContext(mDisplay, ctx);
+            }
+            return;
+        }
+
+        for (;;) {
+            std::shared_ptr<Job> job;
+            {
+                std::unique_lock<std::mutex> lock(mMutex);
+                mCv.wait(lock, [this] { return !mQueue.empty(); });
+                job = mQueue.front();
+                mQueue.pop_front();
+            }
+            const GLuint program = CompileAndLinkProgram(job->vs, job->fs, job->id0, job->id1);
+            // Make the linked program visible to the render thread's context before publishing it.
+            glFinish();
+            job->program = program;
+            job->done.store(true, std::memory_order_release);
+            gLusShaderAsyncCompiled++;
+        }
+    }
+
+    EGLDisplay mDisplay = EGL_NO_DISPLAY;
+    EGLContext mShareContext = EGL_NO_CONTEXT;
+    EGLConfig mConfig = nullptr;
+    std::thread mThread;
+    std::mutex mMutex;
+    std::condition_variable mCv;
+    std::deque<std::shared_ptr<Job>> mQueue;
+    std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<Job>> mJobs; // render thread only
+    int mStartResult = 0;
+    bool mRunning = false;
+};
+
+AsyncShaderCompiler sAsyncShaderCompiler;
+
+void ResetAsyncShaders() {
+    sAsyncShaderCompiler.Reset();
+}
+} // namespace
+
+bool GfxRenderingAPIOGL::PollShaderReady(uint64_t shader_id0, uint64_t shader_id1) {
+    const auto key = std::make_pair(shader_id0, shader_id1);
+    if (!sAsyncShaderCompiler.Running() || mReadyPrograms.count(key) != 0) {
+        return true;
+    }
+    std::string vs, fs;
+    if (!sAsyncShaderCompiler.IsQueued(shader_id0, shader_id1)) {
+        // Sources are built here, on the render thread: BuildFsShader reads renderer state.
+        CCFeatures cc_features;
+        gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
+        fs = BuildFsShader(cc_features);
+        vs = BuildVsShader(cc_features);
+    }
+    GLuint program = 0;
+    if (sAsyncShaderCompiler.Poll(shader_id0, shader_id1, vs, fs, &program)) {
+        mReadyPrograms.emplace(key, program);
+        return true;
+    }
+    gLusShaderAsyncSkippedDraws++;
+    return false;
+}
+#endif
+
 ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
 #ifdef __SWITCH__
     const auto compileStart = std::chrono::steady_clock::now();
@@ -654,11 +846,20 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     const auto fs_buf = BuildFsShader(cc_features);
     const auto vs_buf = BuildVsShader(cc_features);
 
-    GLuint shader_program = CompileAndLinkProgram(vs_buf, fs_buf, shader_id0, shader_id1);
 #ifdef __SWITCH__
-    gLusShaderCompileCount++;
-    gLusShaderCompileMicros +=
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart).count();
+    GLuint shader_program = 0;
+    if (auto ready = mReadyPrograms.find(std::make_pair(shader_id0, shader_id1)); ready != mReadyPrograms.end()) {
+        shader_program = ready->second;
+        mReadyPrograms.erase(ready);
+    } else {
+        shader_program = CompileAndLinkProgram(vs_buf, fs_buf, shader_id0, shader_id1);
+        gLusShaderCompileCount++;
+        gLusShaderCompileMicros +=
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart)
+                .count();
+    }
+#else
+    GLuint shader_program = CompileAndLinkProgram(vs_buf, fs_buf, shader_id0, shader_id1);
 #endif
 
     size_t cnt = 0;
@@ -1079,6 +1280,12 @@ void GfxRenderingAPIOGL::Init() {
             maxThreads(0xFFFFFFFF); // implementation-defined maximum
         }
         SPDLOG_WARN("[switch] GL: glMaxShaderCompilerThreadsKHR {}", maxThreads != nullptr ? "set to max" : "missing");
+        if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger("gSwitchAsyncShaders", 1)) {
+            const bool started = sAsyncShaderCompiler.Start();
+            SPDLOG_WARN("[switch] async shaders: {}", started ? "background compiler running" : "off (inline)");
+        } else {
+            SPDLOG_WARN("[switch] async shaders: disabled by gSwitchAsyncShaders");
+        }
     }
 #elif !defined(__linux__) && !defined(__OpenBSD__) && !defined(USE_OPENGLES)
     glewInit();
