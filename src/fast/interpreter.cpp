@@ -33,6 +33,7 @@
 
 #include "fast/interpreter.h"
 #include "ship/utils/MemCheckpoint.h"
+#include "fast/ShaderPrewarm.h"
 #include "fast/lus_gbi.h"
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -4007,6 +4008,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         mRapi->UnloadShader(mRenderingState.mShaderProgram);
         mRapi->LoadShader(prg);
         mRenderingState.mShaderProgram = prg;
+        ShaderPrewarm::NoteUse(comb->shader_id0, comb->shader_id1 | tm * SHADER_OPT(TEXEL0_CLAMP_S));
     }
     if (use_alpha != mRenderingState.alpha_blend) {
         Flush();
@@ -7935,6 +7937,31 @@ void Interpreter::RunGuiOnly() {
     }
 }
 
+void Interpreter::PrewarmShaders() {
+    std::vector<std::pair<uint64_t, uint64_t>> ids;
+    std::string label;
+    if (!ShaderPrewarm::TakePending(ids, label)) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    size_t compiled = 0;
+    for (const auto& [id0, id1] : ids) {
+        if (mRapi->LookupShader(id0, id1) != nullptr) {
+            continue;
+        }
+        // CreateAndLoadNewShader binds what it builds; unbind it and forget the cached binding so
+        // the next draw reloads its own program.
+        mRapi->UnloadShader(mRenderingState.mShaderProgram);
+        ShaderProgram* prg = mRapi->CreateAndLoadNewShader(id0, id1);
+        mRapi->UnloadShader(prg);
+        mRenderingState.mShaderProgram = nullptr;
+        compiled++;
+    }
+    SPDLOG_INFO("[shaders] prewarm {}: compiled {} of {} listed in {} ms", label, compiled, ids.size(),
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+                    .count());
+}
+
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements,
                       const std::unordered_map<Gfx*, Gfx*>& dl_replacements) {
     SpReset();
@@ -7954,6 +7981,7 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
         PrefetchNow(request);
     }
     HdEvictToBudget();
+    PrewarmShaders();
 
     // Debug visualization of HD-replacement state (per-draw fragment tint).
     mTextureReplacementDebug = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(

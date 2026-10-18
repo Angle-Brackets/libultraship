@@ -890,6 +890,8 @@ class Interpreter {
     void HdTouch(const std::shared_ptr<Ship::IResource>& res, const void* drawKey = nullptr) const;
     void HdRefreshBytes(const Ship::IResource* res) const;
     void HdEvictToBudget();
+    // Compiles queued ShaderPrewarm shaders that aren't built yet (start of a frame, render thread).
+    void PrewarmShaders();
     size_t HdBudgetBytes() const;
     // Port-supplied: the group prefix to prefetch when a replacement is first requested
     std::function<std::string(const std::string&)> mReplacementGroupOf;
