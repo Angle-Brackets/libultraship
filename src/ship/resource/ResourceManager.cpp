@@ -1,4 +1,7 @@
 #include "ship/resource/ResourceManager.h"
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 #include <spdlog/spdlog.h>
 #include "ship/resource/File.h"
 #include "ship/resource/archive/Archive.h"
@@ -57,9 +60,15 @@ void ResourceManager::Init(const std::vector<std::string>& archivePaths,
     mArchiveManager = std::make_shared<ArchiveManager>();
     GetArchiveManager()->Init(archivePaths, validHashes);
 
+#ifdef __SWITCH__
+    // The formula below gives one worker here, and std::threads start on core 0, where the render thread
+    // waits on them for every first-time texture. Two workers on core 2 (audio's; the game is on core 1).
+    mThreadPool = std::make_shared<BS::thread_pool>(2, [] { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2); });
+#else
     // the extra `- 1` is because we reserve an extra thread for spdlog
     size_t threadCount = std::max(1, (int32_t)(std::thread::hardware_concurrency() - reservedThreadCount - 1));
     mThreadPool = std::make_shared<BS::thread_pool>(threadCount);
+#endif
 
     if (!IsLoaded()) {
         // Nothing ever unpauses the thread pool since nothing will ever try to load the archive again.
