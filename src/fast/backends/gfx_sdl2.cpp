@@ -872,6 +872,11 @@ uint32_t gLusPresentCount = 0;
 uint64_t gLusPaceMicros = 0; // SyncFramerateWithTime sleeping
 uint64_t gLusSwapMicros = 0; // SDL_GL_SwapWindow (vsync wait)
 uint64_t gLusSwapMaxMicros = 0;
+// Present-to-present interval (running total), slow ones (> 17.5 ms: a missed 60 Hz vblank) and
+// the worst, which only the graphics benchmark resets.
+uint64_t gLusPresentIntervalMicros = 0;
+uint64_t gLusPresentIntervalMaxMicros = 0;
+uint32_t gLusSlowPresents = 0;
 }
 #endif
 
@@ -946,6 +951,18 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
     if (swapMicros > gLusSwapMaxMicros) {
         gLusSwapMaxMicros = swapMicros;
     }
+    static uint64_t sPrevSwapEnd = 0;
+    if (sPrevSwapEnd != 0) {
+        const uint64_t interval = (swapEnd - sPrevSwapEnd) * 1000000 / freq;
+        gLusPresentIntervalMicros += interval;
+        if (interval > gLusPresentIntervalMaxMicros) {
+            gLusPresentIntervalMaxMicros = interval;
+        }
+        if (interval > 17500) {
+            gLusSlowPresents++;
+        }
+    }
+    sPrevSwapEnd = swapEnd;
 #else
     SyncFramerateWithTime();
     SDL_GL_SwapWindow(mWnd);

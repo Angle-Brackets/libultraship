@@ -202,6 +202,15 @@ void Fast3dWindow::EndFrame() {
     mInterpreter->EndFrame();
 }
 
+#ifdef __SWITCH__
+// CPU time to build and submit a frame (game commands + GUI), excluding pacing and swap. Running
+// total; gLusRenderCpuMaxMicros is only reset by the graphics benchmark.
+extern "C" {
+uint64_t gLusRenderCpuMicros = 0;
+uint64_t gLusRenderCpuMaxMicros = 0;
+}
+#endif
+
 bool Fast3dWindow::IsFrameReady() {
     return mWindowManagerApi->IsFrameReady();
 }
@@ -228,6 +237,9 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
     auto gui = wnd->GetGui();
     // Setup mouse state manager
     wnd->GetMouseStateManager()->StartFrame();
+#ifdef __SWITCH__
+    const auto cpuStart = std::chrono::steady_clock::now();
+#endif
     // Setup of the backend frames and draw initial Window and GUI menus
     gui->StartDraw();
     // Setup game framebuffers to match available window space
@@ -236,6 +248,14 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
     mInterpreter->Run(commands, mtxReplacements, dlReplacements);
     // Renders the game frame buffer to the final window and finishes the GUI
     gui->EndDraw();
+#ifdef __SWITCH__
+    const uint64_t cpuMicros =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - cpuStart).count();
+    gLusRenderCpuMicros += cpuMicros;
+    if (cpuMicros > gLusRenderCpuMaxMicros) {
+        gLusRenderCpuMaxMicros = cpuMicros;
+    }
+#endif
     // Finalize swap buffers
     mInterpreter->EndFrame();
 
@@ -323,7 +343,7 @@ uint32_t Fast3dWindow::GetCurrentRefreshRate() {
 }
 
 bool Fast3dWindow::SupportsWindowedFullscreen() {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__SWITCH__)
     return false;
 #endif
 

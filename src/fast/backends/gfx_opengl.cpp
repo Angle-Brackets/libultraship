@@ -45,6 +45,14 @@ uint32_t gLusShaderCompileCount = 0;
 uint64_t gLusShaderCompileMicros = 0;
 std::atomic<uint32_t> gLusShaderAsyncCompiled { 0 };  // linked on the background thread
 std::atomic<uint32_t> gLusShaderAsyncSkippedDraws { 0 }; // triangles skipped while waiting
+// GPU time per frame, from GL timestamps (running totals; readers take differences). The span is
+// first command to last on the GPU, so it includes any time the GPU waited on the CPU mid-frame.
+// gLusGpuMaxMicros is only reset by whoever wants a windowed max (the graphics benchmark).
+uint32_t gLusGpuFrames = 0;
+uint32_t gLusGpuDropped = 0; // ring full: not measured (never waits)
+uint64_t gLusGpuMicros = 0;
+uint64_t gLusGpuGameMicros = 0; // up to the composite (final blit + ImGui)
+uint64_t gLusGpuMaxMicros = 0;
 }
 
 #ifndef GL_COMPLETION_STATUS_KHR
@@ -1265,6 +1273,12 @@ void GfxRenderingAPIOGL::Init() {
 #if defined(__SWITCH__)
     // switch-glad resolves its entry points through eglGetProcAddress.
     gladLoadGL();
+#ifdef __SWITCH__
+    mGpuTiming = GLAD_GL_VERSION_3_3 != 0;
+    if (mGpuTiming) {
+        glGenQueries(kGpuRing * 3, &mGpuQueries[0][0]);
+    }
+#endif
     {
         // Whether driver binaries can be saved at all (Mesa needs its disk cache for this),
         // and whether the driver can compile shaders off-thread by itself.
@@ -1340,11 +1354,63 @@ void GfxRenderingAPIOGL::OnResize() {
 
 void GfxRenderingAPIOGL::StartFrame() {
     mFrameCount++;
+#ifdef __SWITCH__
+    if (mGpuTiming) {
+        HarvestGpuQueries();
+        mGpuOpen = !mGpuPending[mGpuSlot];
+        if (mGpuOpen) {
+            glQueryCounter(mGpuQueries[mGpuSlot][0], GL_TIMESTAMP);
+            mGpuGameDone = false;
+        } else {
+            gLusGpuDropped++;
+        }
+    }
+#endif
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
+#ifdef __SWITCH__
+    if (mGpuOpen) {
+        if (!mGpuGameDone) {
+            glQueryCounter(mGpuQueries[mGpuSlot][1], GL_TIMESTAMP);
+        }
+        glQueryCounter(mGpuQueries[mGpuSlot][2], GL_TIMESTAMP);
+        mGpuPending[mGpuSlot] = true;
+        mGpuSlot = (mGpuSlot + 1) % kGpuRing;
+        mGpuOpen = false;
+    }
+#endif
     glFlush();
 }
+
+#ifdef __SWITCH__
+void GfxRenderingAPIOGL::HarvestGpuQueries() {
+    // Oldest first (mGpuSlot is the oldest); results arrive in order, so stop at the first not ready.
+    for (int n = 0; n < kGpuRing; n++) {
+        const int slot = (mGpuSlot + n) % kGpuRing;
+        if (!mGpuPending[slot]) {
+            continue;
+        }
+        GLint available = 0;
+        glGetQueryObjectiv(mGpuQueries[slot][2], GL_QUERY_RESULT_AVAILABLE, &available);
+        if (!available) {
+            break;
+        }
+        GLuint64 start = 0, gameDone = 0, end = 0;
+        glGetQueryObjectui64v(mGpuQueries[slot][0], GL_QUERY_RESULT, &start);
+        glGetQueryObjectui64v(mGpuQueries[slot][1], GL_QUERY_RESULT, &gameDone);
+        glGetQueryObjectui64v(mGpuQueries[slot][2], GL_QUERY_RESULT, &end);
+        mGpuPending[slot] = false;
+        const uint64_t micros = (end - start) / 1000;
+        gLusGpuFrames++;
+        gLusGpuMicros += micros;
+        gLusGpuGameMicros += (gameDone - start) / 1000;
+        if (micros > gLusGpuMaxMicros) {
+            gLusGpuMaxMicros = micros;
+        }
+    }
+}
+#endif
 
 void GfxRenderingAPIOGL::FinishRender() {
 }
@@ -1436,6 +1502,13 @@ void GfxRenderingAPIOGL::UpdateFramebufferParameters(int fb_id, uint32_t width, 
 
 void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
     FramebufferOGL& fb = mFrameBuffers[fb_id];
+#ifdef __SWITCH__
+    if (fb_id == 0 && mGpuOpen && !mGpuGameDone) {
+        // Back to the default framebuffer: the game scene is done, the composite follows.
+        glQueryCounter(mGpuQueries[mGpuSlot][1], GL_TIMESTAMP);
+        mGpuGameDone = true;
+    }
+#endif
 
     if (noise_scale != 0.0f) {
         mCurrentNoiseScale = 1.0f / noise_scale;

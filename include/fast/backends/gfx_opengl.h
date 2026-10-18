@@ -174,6 +174,16 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 #endif
 
     uint32_t mFrameCount = 0;
+#ifdef __SWITCH__
+    // GPU frame timing: timestamps at frame start, end of the game scene and frame end, read a few
+    // frames later so it never stalls. Results go to the gLusGpu* counters (gfx_opengl.cpp).
+    static constexpr int kGpuRing = 6;
+    GLuint mGpuQueries[kGpuRing][3] = {};
+    bool mGpuPending[kGpuRing] = {};
+    int mGpuSlot = 0;
+    bool mGpuTiming = false, mGpuOpen = false, mGpuGameDone = false;
+    void HarvestGpuQueries();
+#endif
 
     std::vector<FramebufferOGL> mFrameBuffers;
     size_t mCurrentFrameBuffer = 0;
