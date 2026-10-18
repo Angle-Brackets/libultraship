@@ -62,7 +62,7 @@ uint64_t gLusVboMaxMicros = 0; // longest single upload; the reader resets it
 
 // Draw-overhead cuts, switchable at runtime for A/B runs (Switch render A/B benchmark). 1 = on.
 extern "C" {
-int gLusStreamVbo = 1;
+int gLusStreamVbo = 0; // off until the fenced ring is proven on hardware
 int gLusUniformCache = 1;
 }
 #ifdef __SWITCH__
@@ -103,8 +103,8 @@ GfxClipParameters GfxRenderingAPIOGL::GetClipParameters() {
     return { false, mFrameBuffers[mCurrentFrameBuffer].invertY };
 }
 
-// Vertex stream buffer size: several frames of the heaviest scenes between reallocations.
-constexpr size_t kVboStreamBytes = 4 * 1024 * 1024;
+// Size of each stream buffer: a few frames of the heaviest scenes; one draw is at most ~100 KiB.
+constexpr size_t kVboStreamBytes = 1024 * 1024;
 
 static void VertexArraySetAttribs(ShaderProgram* prg) {
     size_t numFloats = prg->numFloats;
@@ -1202,6 +1202,43 @@ void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
     }
 }
 
+void GfxRenderingAPIOGL::BindVbo(GLuint vbo) {
+    if (mBoundVbo != vbo) {
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        mBoundVbo = vbo;
+        // Attribute pointers capture the buffer bound when they are set.
+        if (mCurrentShaderProgram != nullptr) {
+            VertexArraySetAttribs(mCurrentShaderProgram);
+        }
+    }
+}
+
+void GfxRenderingAPIOGL::NextStreamVbo() {
+    if (mVboRing[0] == 0) {
+        glGenBuffers(kVboRingCount, mVboRing);
+        for (GLuint vbo : mVboRing) {
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBufferData(GL_ARRAY_BUFFER, kVboStreamBytes, nullptr, GL_STREAM_DRAW);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, mBoundVbo);
+        mVboRingIndex = kVboRingCount - 1;
+    } else {
+        // Done writing the current one: the GPU releases it once its draws so far have run.
+        if (mVboFence[mVboRingIndex] != nullptr) {
+            glDeleteSync(mVboFence[mVboRingIndex]);
+        }
+        mVboFence[mVboRingIndex] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    }
+    mVboRingIndex = (mVboRingIndex + 1) % kVboRingCount;
+    if (GLsync fence = mVboFence[mVboRingIndex]; fence != nullptr) {
+        // Last used kVboRingCount - 1 buffers ago, so normally long signalled.
+        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ULL);
+        glDeleteSync(fence);
+        mVboFence[mVboRingIndex] = nullptr;
+    }
+    BindVbo(mVboRing[mVboRingIndex]);
+}
+
 void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     // N64 backface culling. The RSP cross product C = (v1-v2) x (v3-v2) relates
     // to rasterizer winding via the VS y flip: signed area A = (yFlipped ? C : -C),
@@ -1285,37 +1322,33 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 #endif
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
-    // Append to the stream buffer; start on a whole vertex so the attribute pointers (offset 0) still line up.
-    const size_t stride = mCurrentShaderProgram->numFloats * sizeof(float);
     const size_t bytes = sizeof(float) * buf_vbo_len;
-    size_t first = mVboOffset == SIZE_MAX ? SIZE_MAX : (mVboOffset + stride - 1) / stride;
-    if (!gLusStreamVbo) {
-        // Off: the old per-draw reallocation.
+    GLint firstVertex = 0;
+    if (!gLusStreamVbo || glFenceSync == nullptr || glMapBufferRange == nullptr) {
+        // The old path: reallocate the one buffer with this draw's vertices.
+        BindVbo(mOpenglVbo);
         glBufferData(GL_ARRAY_BUFFER, bytes, buf_vbo, GL_STREAM_DRAW);
         mVboOffset = SIZE_MAX;
-        first = 0;
-    } else if (first == SIZE_MAX || first * stride + bytes > kVboStreamBytes) {
-        // Full: orphan it. Ranges written since were never drawn from, so the driver needn't wait on the GPU.
-        glBufferData(GL_ARRAY_BUFFER, std::max(kVboStreamBytes, bytes), nullptr, GL_STREAM_DRAW);
-        first = 0;
-    }
-    // Unsynchronized: this range hasn't been drawn from since the orphan, so the driver must not wait for
-    // the GPU to finish with the buffer (glBufferSubData on a busy buffer may).
-    void* dst = !gLusStreamVbo ? nullptr
-                : glMapBufferRange != nullptr
-                    ? glMapBufferRange(GL_ARRAY_BUFFER, first * stride, bytes,
-                                       GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT)
-                    : nullptr;
-    if (dst != nullptr) {
-        memcpy(dst, buf_vbo, bytes);
-        glUnmapBuffer(GL_ARRAY_BUFFER);
-    } else if (gLusStreamVbo) {
-        glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
-    }
-    if (gLusStreamVbo) {
+    } else {
+        // Start on a whole vertex so the attribute pointers (offset 0) still line up.
+        const size_t stride = mCurrentShaderProgram->numFloats * sizeof(float);
+        size_t first = mVboOffset == SIZE_MAX ? SIZE_MAX : (mVboOffset + stride - 1) / stride;
+        if (first == SIZE_MAX || first * stride + bytes > kVboStreamBytes) {
+            NextStreamVbo();
+            first = 0;
+        }
+        // Unsynchronized: the GPU is done with this buffer (fence) and this range is new since.
+        void* dst = glMapBufferRange(GL_ARRAY_BUFFER, first * stride, bytes,
+                                     GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (dst != nullptr) {
+            memcpy(dst, buf_vbo, bytes);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+        } else {
+            glBufferSubData(GL_ARRAY_BUFFER, first * stride, bytes, buf_vbo);
+        }
         mVboOffset = first * stride + bytes;
+        firstVertex = (GLint) first;
     }
-    const GLint firstVertex = (GLint) first;
 #ifdef __SWITCH__
     {
         const uint64_t us =
@@ -1407,6 +1440,7 @@ void GfxRenderingAPIOGL::Init() {
 
     glGenBuffers(1, &mOpenglVbo);
     glBindBuffer(GL_ARRAY_BUFFER, mOpenglVbo);
+    mBoundVbo = mOpenglVbo;
 
 #if defined(__APPLE__) || defined(USE_OPENGLES)
     glGenVertexArrays(1, &mOpenglVao);

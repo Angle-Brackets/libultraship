@@ -177,9 +177,17 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     ShaderProgram* mLastLoadedShader = nullptr;
 
     GLuint mOpenglVbo = 0;
-    // Vertices stream into one buffer at increasing offsets; it is orphaned (reallocated) only when
-    // full, not on every draw. SIZE_MAX: not allocated yet.
+    // Stream VBO: vertices go into one of kVboRingCount fixed buffers at increasing offsets. A full buffer
+    // gets a fence and the next one is used once the GPU is done with it, so nothing is reallocated
+    // (orphaning a big buffer stalled on nouveau). SIZE_MAX: no current buffer.
+    static constexpr int kVboRingCount = 4;
+    GLuint mVboRing[kVboRingCount] = {};
+    GLsync mVboFence[kVboRingCount] = {};
+    int mVboRingIndex = 0;
     size_t mVboOffset = SIZE_MAX;
+    GLuint mBoundVbo = 0;
+    void BindVbo(GLuint vbo);
+    void NextStreamVbo();
     // Generation of each uniform group (combiner, custom, transform, lighting), bumped when it changes.
     uint32_t mUniformGen[4] = { 1, 1, 1, 1 };
 #if defined(__APPLE__) || defined(USE_OPENGLES)
