@@ -860,6 +860,30 @@ class Interpreter {
     // 0 = previous tick, 1 = current tick. Set by the port before each
     // DrawAndRunGraphicsCommands call, like mInterpolationIndex.
     float mInterpolationT = 1.0f;
+    // 2D rect interpolation (text, menus, cursors): rects have screen coordinates in the display list, so
+    // matrix interpolation can't move them. 0 = off, 1 = key frame (record each rect), 2 = in-between frame
+    // (move each rect from where the same texture and size was drawn last key frame by mInterpolationT).
+    int mRectLerpMode = 0;
+    struct LerpRectPos {
+        int32_t ulx, uly;
+    };
+    std::unordered_map<uint64_t, std::vector<LerpRectPos>> mRectLerpPrev;
+    std::unordered_map<uint64_t, std::vector<LerpRectPos>> mRectLerpCur;
+    std::unordered_map<uint64_t, uint32_t> mRectLerpSeen;
+    void LerpRect(uint64_t key, int32_t& ulx, int32_t& uly, int32_t& lrx, int32_t& lry);
+    // gDPRectGroup: rects inside move with the group (key frame position to this one, by mInterpolationT).
+    struct RectGroup {
+        uint64_t key;
+        int32_t x, y;       // this frame's position, U10.2
+        int32_t offX, offY; // the group's in-between offset, U10.2
+        bool rigid;         // rects inside don't move on their own (text)
+    };
+    std::vector<RectGroup> mRectGroupStack;
+    std::unordered_map<uint64_t, LerpRectPos> mRectGroupPrev;
+    std::unordered_map<uint64_t, LerpRectPos> mRectGroupCur;
+    void PushRectGroup(uint64_t id, int32_t x, int32_t y, bool rigid);
+    void PopRectGroup();
+    void LerpScissor(uint32_t& ulx, uint32_t& uly, uint32_t& lrx, uint32_t& lry);
     int mInterpolationTotal{};
     float mInterpolationFrac{};
     // N64 RGB framebuffer dither (G_CD_*), applied per-draw in the fragment shader.

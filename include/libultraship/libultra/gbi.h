@@ -205,6 +205,9 @@
 #define G_PAL_BLEND 0x4e
 #define G_PAL_MASK 0x4f
 #define G_PAL_TINT 0x50
+#define G_RECT_GROUP 0x51
+#define G_RECT_GROUP_END 0x52
+#define G_RECT_GROUP_RIGID 0x53
 
 /*
  * The following commands are the "generated" RDP commands; the user
@@ -2873,6 +2876,30 @@ typedef union Gfx {
         _g1->words.w0 = (uintptr_t)(base);                                                         \
         _g1->words.w1 = _SHIFTL((uint8_t)(mr), 16, 8) | _SHIFTL((uint8_t)(mg), 8, 8) |             \
                         _SHIFTL((uint8_t)(mb), 0, 8);                                              \
+    }
+
+// 2D rect interpolation group: until gDPRectGroupEnd, rects (and scissors) move between game frames with the
+// group's position (`x`, `y` in screen pixels, -2048..2047) as one, plus their own motion relative to it.
+// `id` names the group across frames; repeats of an id in a frame are told apart by order. Groups nest.
+#define gDPRectGroup(pkt, id, x, y)                                                                     \
+    {                                                                                                   \
+        Gfx* _g = (Gfx*)(pkt);                                                                          \
+        _g->words.w0 = _SHIFTL(G_RECT_GROUP, 24, 8) | _SHIFTL((x), 12, 12) | _SHIFTL((y), 0, 12);       \
+        _g->words.w1 = (uintptr_t)(id);                                                                 \
+    }
+// The same, but rects inside only move with the group, never on their own: for text, where pairing the n-th
+// "e" of new text with the n-th "e" of the old would draw letters between the two layouts.
+#define gDPRectGroupRigid(pkt, id, x, y)                                                                \
+    {                                                                                                   \
+        Gfx* _g = (Gfx*)(pkt);                                                                          \
+        _g->words.w0 = _SHIFTL(G_RECT_GROUP_RIGID, 24, 8) | _SHIFTL((x), 12, 12) | _SHIFTL((y), 0, 12); \
+        _g->words.w1 = (uintptr_t)(id);                                                                 \
+    }
+#define gDPRectGroupEnd(pkt)                                   \
+    {                                                          \
+        Gfx* _g = (Gfx*)(pkt);                                 \
+        _g->words.w0 = _SHIFTL(G_RECT_GROUP_END, 24, 8);       \
+        _g->words.w1 = 0;                                      \
     }
 
 // Toggles strict (depth-equal) decal compare for subsequent ZMODE_DEC draws,

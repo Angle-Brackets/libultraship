@@ -4624,6 +4624,7 @@ void Interpreter::GfxSpTexture(uint16_t sc, uint16_t tc, uint8_t level, uint8_t 
 }
 
 void Interpreter::GfxDpSetScissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32_t lrx, uint32_t lry) {
+    LerpScissor(ulx, uly, lrx, lry);
     float x = ulx / 4.0f;
     float y = lry / 4.0f;
     float width = (lrx - ulx) / 4.0f;
@@ -5148,9 +5149,107 @@ void Interpreter::GfxDrawRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_
     }
 }
 
+void Interpreter::LerpRect(uint64_t key, int32_t& ulx, int32_t& uly, int32_t& lrx, int32_t& lry) {
+    // Farther than this (U10.2, so 48 px) per tick is a jump, not motion.
+    constexpr int32_t kMaxMove = 48 << 2;
+    if (mRectLerpMode == 0) {
+        return;
+    }
+    // Inside a group, positions are relative to it and the group's own motion is added on top.
+    const RectGroup* group = mRectGroupStack.empty() ? nullptr : &mRectGroupStack.back();
+    const int32_t baseX = group != nullptr ? group->x : 0;
+    const int32_t baseY = group != nullptr ? group->y : 0;
+    int32_t offX = group != nullptr ? group->offX : 0;
+    int32_t offY = group != nullptr ? group->offY : 0;
+    if (group != nullptr && group->rigid) {
+        if (mRectLerpMode == 2) {
+            ulx += offX;
+            lrx += offX;
+            uly += offY;
+            lry += offY;
+        }
+        return;
+    }
+    // Pair the n-th rect of a texture and size (in this group) with last key frame's n-th, so unrelated
+    // rects appearing or disappearing don't shift the pairing.
+    key ^= ((uint64_t)(uint32_t)(lrx - ulx) << 32 | (uint32_t)(lry - uly)) * 0x9E3779B97F4A7C15ULL;
+    if (group != nullptr) {
+        key ^= group->key * 0xC2B2AE3D27D4EB4FULL;
+    }
+    const uint32_t n = mRectLerpSeen[key]++;
+    if (mRectLerpMode == 1) {
+        mRectLerpCur[key].push_back({ ulx - baseX, uly - baseY });
+        return;
+    }
+    if (auto it = mRectLerpPrev.find(key); it != mRectLerpPrev.end() && n < it->second.size()) {
+        const int32_t dx = (ulx - baseX) - it->second[n].ulx;
+        const int32_t dy = (uly - baseY) - it->second[n].uly;
+        if ((dx != 0 || dy != 0) && std::abs(dx) <= kMaxMove && std::abs(dy) <= kMaxMove) {
+            offX += (int32_t)std::lround(-dx * (1.0f - mInterpolationT));
+            offY += (int32_t)std::lround(-dy * (1.0f - mInterpolationT));
+        }
+    }
+    ulx += offX;
+    lrx += offX;
+    uly += offY;
+    lry += offY;
+}
+
+void Interpreter::PushRectGroup(uint64_t id, int32_t x, int32_t y, bool rigid) {
+    // A group moving farther than this (U10.2, so 128 px) per tick jumped.
+    constexpr int32_t kMaxGroupMove = 128 << 2;
+    // Inside a rigid group everything is rigid.
+    rigid = rigid || (!mRectGroupStack.empty() && mRectGroupStack.back().rigid);
+    RectGroup group = { id, x << 2, y << 2, 0, 0, rigid };
+    if (mRectLerpMode == 0) {
+        mRectGroupStack.push_back(group);
+        return;
+    }
+    // Nested groups keep their parent in the key, so the same id under different parents stays apart.
+    if (!mRectGroupStack.empty()) {
+        group.key ^= mRectGroupStack.back().key * 0x9E3779B97F4A7C15ULL;
+    }
+    group.key ^= (uint64_t)mRectLerpSeen[group.key ^ 0x6A09E667F3BCC908ULL]++ << 48;
+    if (mRectLerpMode == 1) {
+        mRectGroupCur[group.key] = { group.x, group.y };
+    } else if (auto it = mRectGroupPrev.find(group.key); it != mRectGroupPrev.end()) {
+        const int32_t dx = group.x - it->second.ulx;
+        const int32_t dy = group.y - it->second.uly;
+        if (std::abs(dx) <= kMaxGroupMove && std::abs(dy) <= kMaxGroupMove) {
+            group.offX = (int32_t)std::lround(-dx * (1.0f - mInterpolationT));
+            group.offY = (int32_t)std::lround(-dy * (1.0f - mInterpolationT));
+        }
+    } else if (!mRectGroupStack.empty()) {
+        // New this frame: ride on the parent's motion (positions are absolute, so a known group's own
+        // motion already includes it).
+        group.offX = mRectGroupStack.back().offX;
+        group.offY = mRectGroupStack.back().offY;
+    }
+    mRectGroupStack.push_back(group);
+}
+
+void Interpreter::PopRectGroup() {
+    if (!mRectGroupStack.empty()) {
+        mRectGroupStack.pop_back();
+    }
+}
+
+// Window contents are often clipped to the window; the clip has to move with them.
+void Interpreter::LerpScissor(uint32_t& ulx, uint32_t& uly, uint32_t& lrx, uint32_t& lry) {
+    if (mRectLerpMode != 2 || mRectGroupStack.empty()) {
+        return;
+    }
+    const RectGroup& group = mRectGroupStack.back();
+    ulx = (uint32_t)std::max<int32_t>(0, (int32_t)ulx + group.offX);
+    lrx = (uint32_t)std::max<int32_t>(0, (int32_t)lrx + group.offX);
+    uly = (uint32_t)std::max<int32_t>(0, (int32_t)uly + group.offY);
+    lry = (uint32_t)std::max<int32_t>(0, (int32_t)lry + group.offY);
+}
+
 void Interpreter::GfxDpTextureRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls,
                                         int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     // printf("render %d at %d\n", tile, lrx);
+    LerpRect((uint64_t)(uintptr_t)mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr, ulx, uly, lrx, lry);
     uint64_t saved_combine_mode = mRdp->combine_mode;
     if ((mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
@@ -5263,6 +5362,15 @@ void Interpreter::GfxDpImageRectangle(int32_t tile, int32_t w, int32_t h, int32_
 }
 
 void Interpreter::GfxDpFillRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+    if (mRdp->color_image_address != mRdp->z_buf_address) {
+        // Keyed by colour; the fill colour for fill mode, the primitive colour (G_CC_PRIMITIVE boxes) otherwise.
+        LerpRect(((uint64_t)mRdp->fill_color.r << 24 | mRdp->fill_color.g << 16 | mRdp->fill_color.b << 8 |
+                  mRdp->fill_color.a) ^
+                     ((uint64_t)mRdp->prim_color.r << 56 | (uint64_t)mRdp->prim_color.g << 48 |
+                      (uint64_t)mRdp->prim_color.b << 40 | (uint64_t)mRdp->prim_color.a << 32) ^
+                     0xF111F111ULL,
+                 ulx, uly, lrx, lry);
+    }
     if (mRdp->color_image_address == mRdp->z_buf_address) {
         // Fullscreen Z clears are redundant — already done by glClear at frame start.
         bool isFullScreen = (ulx <= 0 && uly <= 0 && lrx >= (int32_t)(mNativeDimensions.width - 1) * 4 &&
@@ -6899,6 +7007,21 @@ bool gfx_palette_mask_handler_custom(F3DGfx** cmd0) {
 }
 
 // G_PAL_TINT: see gDPPaletteTint.
+bool gfx_rect_group_handler_custom(F3DGfx** cmd0) {
+    F3DGfx* cmd = *cmd0;
+    // x and y are signed 12-bit.
+    const int32_t x = (int32_t)(C0(12, 12) << 20) >> 20;
+    const int32_t y = (int32_t)(C0(0, 12) << 20) >> 20;
+    const bool rigid = (int8_t)(cmd->words.w0 >> 24) == OTR_G_RECT_GROUP_RIGID;
+    sInstanceRaw->PushRectGroup((uint64_t)cmd->words.w1, x, y, rigid);
+    return false;
+}
+
+bool gfx_rect_group_end_handler_custom(F3DGfx** cmd0) {
+    sInstanceRaw->PopRectGroup();
+    return false;
+}
+
 bool gfx_palette_tint_handler_custom(F3DGfx** cmd0) {
     Interpreter* gfx = sInstanceRaw;
     F3DGfx* cmd = *cmd0;
@@ -7603,6 +7726,9 @@ static constexpr UcodeHandler otrHandlers = {
     { OTR_G_PAL_BLEND, { "G_PAL_BLEND", gfx_palette_blend_handler_custom } },
     { OTR_G_PAL_MASK, { "G_PAL_MASK", gfx_palette_mask_handler_custom } },
     { OTR_G_PAL_TINT, { "G_PAL_TINT", gfx_palette_tint_handler_custom } },
+    { OTR_G_RECT_GROUP, { "G_RECT_GROUP", gfx_rect_group_handler_custom } },
+    { OTR_G_RECT_GROUP_END, { "G_RECT_GROUP_END", gfx_rect_group_end_handler_custom } },
+    { OTR_G_RECT_GROUP_RIGID, { "G_RECT_GROUP_RIGID", gfx_rect_group_handler_custom } },
 };
 
 static constexpr UcodeHandler f3dex2Handlers = {
@@ -8151,6 +8277,12 @@ void Interpreter::PrewarmShaders() {
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements,
                       const std::unordered_map<Gfx*, Gfx*>& dl_replacements) {
     SpReset();
+    mRectLerpSeen.clear();
+    mRectGroupStack.clear();
+    if (mRectLerpMode == 1) {
+        mRectLerpCur.clear();
+        mRectGroupCur.clear();
+    }
     mTriStateGen++; // per-frame state (bindings, viewport, CVars) is reset below
     // Bindings may have changed between frames (GUI, post-processing).
     memset(mRenderingState.mBoundTexIds, 0, sizeof(mRenderingState.mBoundTexIds));
@@ -8246,6 +8378,10 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
         gfx_step();
     }
 
+    if (mRectLerpMode == 1) {
+        std::swap(mRectLerpPrev, mRectLerpCur);
+        std::swap(mRectGroupPrev, mRectGroupCur);
+    }
     Flush();
     mGfxFrameBuffer = 0;
     currentDir = std::stack<std::string>();
