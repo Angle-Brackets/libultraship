@@ -43,22 +43,36 @@ O2rArchive::~O2rArchive() {
 }
 
 zip_t* O2rArchive::GetZipHandle() {
-    std::lock_guard<std::mutex> lock(mPoolMutex);
+    std::unique_lock<std::mutex> lock(mPoolMutex);
+#ifdef __SWITCH__
+    // A fresh handle re-reads the whole central directory (60k entries for pm64.o2r): ~0.5 s alone,
+    // 5 s when other loads compete for the card. A read takes milliseconds, so wait for the one handle.
+    constexpr size_t kMaxHandles = 1;
+    mPoolCv.wait(lock, [this] { return !mZipArchivePool.empty() || mOpenHandles < kMaxHandles; });
+#endif
     if (!mZipArchivePool.empty()) {
         zip_t* handle = mZipArchivePool.back();
         mZipArchivePool.pop_back();
         return handle;
     }
+    mOpenHandles++;
+    lock.unlock();
 #ifdef __SWITCH__
-    // A fresh handle re-reads the whole central directory (60k entries for pm64.o2r).
     const auto openStart = std::chrono::steady_clock::now();
     zip_t* opened = zip_open(GetPath().c_str(), ZIP_RDONLY, nullptr);
+    const uint64_t openMicros = MicrosSince(openStart);
     gLusArchiveOpenCount++;
-    gLusArchiveOpenMicros += MicrosSince(openStart);
-    return opened;
+    gLusArchiveOpenMicros += openMicros;
+    SPDLOG_INFO("[io] opened a handle on {} in {} ms", GetPath(), openMicros / 1000);
 #else
-    return zip_open(GetPath().c_str(), ZIP_RDONLY, nullptr);
+    zip_t* opened = zip_open(GetPath().c_str(), ZIP_RDONLY, nullptr);
 #endif
+    if (opened == nullptr) {
+        lock.lock();
+        mOpenHandles--;
+        mPoolCv.notify_one();
+    }
+    return opened;
 }
 
 void O2rArchive::ReleaseZipHandle(zip_t* handle) {
@@ -66,8 +80,11 @@ void O2rArchive::ReleaseZipHandle(zip_t* handle) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mPoolMutex);
-    mZipArchivePool.push_back(handle);
+    {
+        std::lock_guard<std::mutex> lock(mPoolMutex);
+        mZipArchivePool.push_back(handle);
+    }
+    mPoolCv.notify_one();
 }
 
 std::shared_ptr<File> O2rArchive::LoadFile(uint64_t hash) {
@@ -181,6 +198,7 @@ bool O2rArchive::Close() {
             success = false;
         }
     }
+    mOpenHandles -= mZipArchivePool.size();
     mZipArchivePool.clear();
 
     return success;
@@ -221,8 +239,10 @@ bool O2rArchive::WriteFile(const std::string& filePath, const std::vector<uint8_
         for (auto* handle : mZipArchivePool) {
             zip_close(handle);
         }
+        mOpenHandles -= mZipArchivePool.size();
         mZipArchivePool.clear();
     }
+    mPoolCv.notify_all();
 
     SPDLOG_INFO("Successfully wrote file: {}", filePath);
 
