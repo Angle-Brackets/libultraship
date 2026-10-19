@@ -1,4 +1,10 @@
 # libultraship
+> **This is a fork for [PaperBoat — Switch Port](https://github.com/Angle-Brackets/PaperBoat-Switch-Port).**
+> The `pm64-switch` branch keeps Nintendo Switch (devkitA64/libnx) support, which upstream libultraship dropped,
+> and adds the Switch performance work the port uses. It's based on
+> [JeodC/libultraship](https://github.com/JeodC/libultraship), from [Kenix3/libultraship](https://github.com/Kenix3/libultraship).
+> Please report problems with it [on the port](https://github.com/Angle-Brackets/PaperBoat-Switch-Port/issues), not upstream.
+
 libultraship (LUS) is a library meant to provide reimplementations of libultra (n64 sdk) functions that run on modern hardware.
 
 LUS uses an asset loading system where data is stored separately from the executable in an archive file ending in `.otr` or `.o2r`. `.otr` files are [`.mpq`](http://www.zezula.net/en/mpq/main.html) compatible files. `.o2r` files are `.zip` compatible files. This separation of data from executable follows modern design practices which are more mod friendly. All one needs to do is supply a patch `.otr` or `.o2r` and the system will automatically replace the data.
