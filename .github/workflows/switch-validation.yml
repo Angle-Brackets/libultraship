@@ -1,0 +1,64 @@
+name: switch-validation
+
+# Builds the PaperBoat Switch port's NRO with this commit of libultraship, so a change that breaks the
+# Switch build is caught here. The port's CMake sets up the Switch dependencies, so libultraship
+# can't be built for Switch on its own.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-switch:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+    - name: Install build tools
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends git openssh-client cmake make
+        # The image ships most portlibs already. Only sync when something is missing: pkg.devkitpro.org
+        # sometimes refuses CI runners (403), so retry a few times.
+        pkgs="switch-sdl2 switch-glad switch-mesa switch-libdrm_nouveau switch-curl"
+        if ! dkp-pacman -Q $pkgs >/dev/null 2>&1; then
+          for i in 1 2 3 4 5; do
+            dkp-pacman -Sy --noconfirm --needed $pkgs && break
+            [ "$i" = 5 ] && exit 1
+            sleep $((i * 20))
+          done
+        fi
+
+    # The port and Torch are private for now, read with deploy keys (PAPERBOAT_DEPLOY_KEY and
+    # TORCH_DEPLOY_KEY). Once they're public the keys can go: checkout falls back to the token.
+    - name: Check out the Switch port
+      uses: actions/checkout@v4
+      with:
+        repository: Angle-Brackets/PaperBoat-Switch-Port
+        ref: switch-port
+        ssh-key: ${{ secrets.PAPERBOAT_DEPLOY_KEY }}
+
+    - name: Find the port's Torch commit
+      id: torch
+      run: |
+        git config --global --add safe.directory '*'
+        echo "sha=$(git ls-tree HEAD external/torch | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+    - name: Check out Torch
+      uses: actions/checkout@v4
+      with:
+        repository: Angle-Brackets/Torch
+        ref: ${{ steps.torch.outputs.sha }}
+        path: external/torch
+        ssh-key: ${{ secrets.TORCH_DEPLOY_KEY }}
+
+    - name: Check out this libultraship
+      uses: actions/checkout@v4
+      with:
+        path: external/libultraship
+
+    - name: Build the NRO
+      run: |
+        cmake -B build-switch -S . -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release
+        cmake --build build-switch --target Paperboat_nro -j$(nproc)
