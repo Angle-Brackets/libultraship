@@ -676,6 +676,13 @@ std::string Context::LocateFileAcrossAppDirs(const std::string& path, const std:
     if (std::filesystem::exists(fpath)) {
         return fpath;
     }
+#ifdef __SWITCH__
+    // files bundled in the NRO's romfs, so a release can be the .nro alone
+    fpath = "romfs:/" + path;
+    if (std::filesystem::exists(fpath)) {
+        return fpath;
+    }
+#endif
     // current dir
     return "./" + std::string(path);
 }
